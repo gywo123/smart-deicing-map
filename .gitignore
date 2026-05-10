@@ -1,0 +1,8 @@
+.venv/
+.pydeps/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+2026-Engineering-Industry-Contest-main/
+models/
+outputs/
