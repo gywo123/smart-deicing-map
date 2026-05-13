@@ -1,12 +1,11 @@
-"""Dispatch planning algorithms for deicing target selection and routing.
+"""제설 대상 선정과 경로 생성을 위한 배차 계획 알고리즘.
 
-The primary MVP pipeline is:
+현재 MVP의 핵심 파이프라인은 다음과 같다.
 
-1. select target roads with Knapsack or Budgeted Maximum Coverage
-2. route selected targets with a simple VRP nearest-neighbor heuristic
+1. Knapsack 또는 Budgeted Maximum Coverage로 제설 대상 도로를 선정한다.
+2. 선정된 대상을 단순 VRP nearest-neighbor 휴리스틱으로 경로화한다.
 
-The older Greedy allocation function remains as a lightweight assignment
-baseline.
+기존 Greedy 할당 함수는 가벼운 비교용 baseline으로 유지한다.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ import math
 
 @dataclass(frozen=True)
 class DeicingCandidate:
-    """A candidate road segment or grid cell cluster that can be treated."""
+    """제설 처리 대상이 될 수 있는 도로 세그먼트 또는 grid cell 묶음."""
 
     candidate_id: str
     cost: int
@@ -44,7 +43,7 @@ class DeicingCandidate:
 
 @dataclass(frozen=True)
 class RoutingVehicle:
-    """Vehicle constraints for VRP-style routing."""
+    """VRP 방식 경로 생성에 사용할 차량 제약 조건."""
 
     vehicle_id: str
     capacity: int
@@ -82,10 +81,10 @@ class SelectionSummary:
 
 
 def knapsack_select(candidates: list[DeicingCandidate], budget: int) -> list[DeicingCandidate]:
-    """Select high-value deicing candidates under a cost budget.
+    """정해진 비용 예산 안에서 가치가 높은 제설 후보를 선택한다.
 
-    This is a 0/1 Knapsack baseline. It ignores overlapping coverage and routing
-    distance, so it is useful as an easy-to-explain comparison model.
+    0/1 Knapsack baseline이다. 커버리지 중복과 이동 거리는 고려하지 않으므로,
+    설명하기 쉬운 비교 모델로 쓰기 좋다.
     """
     if budget < 0:
         raise ValueError("budget must be non-negative")
@@ -117,11 +116,11 @@ def budgeted_maximum_coverage_select(
     cell_values: dict[str, float],
     budget: int,
 ) -> list[DeicingCandidate]:
-    """Greedy Budgeted Maximum Coverage selection.
+    """Greedy 방식의 Budgeted Maximum Coverage 대상 선정.
 
-    Each candidate covers a set of risk grid cells. The algorithm repeatedly
-    picks the affordable candidate with the largest uncovered cell value per
-    cost, which reduces duplicated treatment of the same risk area.
+    각 후보는 위험 grid cell 집합을 커버한다. 이 알고리즘은 예산 안에서
+    아직 덮이지 않은 cell 가치를 비용 대비 가장 많이 늘리는 후보를 반복 선택해
+    같은 위험 구역을 중복 처리하는 문제를 줄인다.
     """
     if budget < 0:
         raise ValueError("budget must be non-negative")
@@ -167,11 +166,11 @@ def hybrid_bmc_knapsack_select(
     coverage_weight: float = 0.55,
     priority_weight: float = 0.45,
 ) -> list[DeicingCandidate]:
-    """Select targets with both new coverage gain and road priority.
+    """새 커버리지 증가량과 도로 자체 우선순위를 함께 보고 대상을 선택한다.
 
-    The downloaded contest pipeline uses this idea: pure Knapsack is easy to
-    explain but can over-select nearby roads, while pure BMC can understate a
-    road's own risk score. This hybrid score keeps both:
+    다운로드한 대회 파이프라인도 이 아이디어를 사용한다. 순수 Knapsack은
+    설명이 쉽지만 가까운 도로를 과하게 고를 수 있고, 순수 BMC는 도로 자체의
+    위험 점수를 약하게 반영할 수 있다. 이 하이브리드 점수는 둘을 함께 유지한다.
 
     score = (coverage_weight * normalized_new_coverage
              + priority_weight * normalized_candidate_value) / cost
@@ -232,7 +231,7 @@ def summarize_selection(
     selected: list[DeicingCandidate],
     cell_values: dict[str, float],
 ) -> SelectionSummary:
-    """Return compact metrics for a selected treatment set."""
+    """선택된 제설 대상 묶음의 핵심 지표를 요약해 반환한다."""
     covered_cells: set[str] = set()
     for candidate in selected:
         covered_cells.update(candidate.covered_cells)
@@ -268,11 +267,11 @@ def plan_vrp_routes(
     vehicles: list[RoutingVehicle],
     value_weight: float = 0.15,
 ) -> list[VehicleRoute]:
-    """Route selected candidates with a simple multi-vehicle nearest-neighbor heuristic.
+    """선택된 후보를 단순 다중 차량 nearest-neighbor 휴리스틱으로 경로화한다.
 
-    This is intentionally lightweight for the MVP. It respects vehicle capacity
-    and max_time, then greedily adds the best nearby stop. A small value bias
-    lets high-risk roads win when distances are similar.
+    MVP용으로 의도적으로 가볍게 만든 방식이다. 차량 용량과 최대 작업 시간을
+    지키면서 가까운 후보를 탐욕적으로 추가한다. 거리 차이가 비슷할 때는
+    작은 가치 가중치 덕분에 고위험 도로가 우선될 수 있다.
     """
     if value_weight < 0:
         raise ValueError("value_weight must be non-negative")
@@ -334,7 +333,7 @@ def plan_deicing_targets_and_routes(
     budget: int,
     vehicles: list[RoutingVehicle],
 ) -> tuple[list[DeicingCandidate], list[VehicleRoute]]:
-    """Select deicing targets with hybrid BMC/Knapsack and route them with VRP."""
+    """Hybrid BMC/Knapsack으로 제설 대상을 고르고 VRP로 경로화한다."""
     selected = hybrid_bmc_knapsack_select(candidates, cell_values, budget)
     routes = plan_vrp_routes(selected, vehicles)
     return selected, routes
@@ -361,7 +360,7 @@ class Allocation:
 
 
 def greedy_allocate(jobs: list[Job], vehicles: list[Vehicle]) -> list[Allocation]:
-    """Greedy baseline: allocate highest-priority jobs first with largest capacity vehicles."""
+    """Greedy baseline: 우선순위가 높은 작업부터 큰 용량 차량에 배정한다."""
     remaining = {job.job_id: job.demand for job in jobs}
     jobs_by_priority = sorted(jobs, key=lambda j: (-j.priority, -j.demand, j.job_id))
     vehicles_by_capacity = sorted(vehicles, key=lambda v: (-v.capacity, v.vehicle_id))
@@ -381,4 +380,3 @@ def greedy_allocate(jobs: list[Job], vehicles: list[Vehicle]) -> list[Allocation
             free -= units
 
     return allocations
-

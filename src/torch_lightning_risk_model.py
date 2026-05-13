@@ -1,4 +1,4 @@
-"""PyTorch + PyTorch Lightning model for road icing risk prediction."""
+"""도로 겨울철 위험 예측용 PyTorch + PyTorch Lightning 모델."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ class IcingRiskNet(nn.Module):
 
 
 class IcingRiskLightningModule(pl.LightningModule):
-    """Binary risk model predicting probability of icing for each road segment."""
+    """도로 세그먼트별 결빙 확률을 예측하는 이진 위험도 모델."""
 
     def __init__(
         self,
@@ -67,11 +67,11 @@ class IcingRiskLightningModule(pl.LightningModule):
         self.register_buffer("_pos_weight", torch.tensor([pos_weight], dtype=torch.float32))
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """Return icing probabilities in the range 0..1."""
+        """0~1 범위의 결빙 확률을 반환한다."""
         return torch.sigmoid(self.predict_logits(features))
 
     def predict_logits(self, features: torch.Tensor) -> torch.Tensor:
-        """Return raw logits for loss calculation or calibrated post-processing."""
+        """손실 계산이나 보정 후처리에 사용할 raw logit을 반환한다."""
         if features.ndim != 2:
             raise ValueError("features must be a 2D tensor shaped (batch, input_dim)")
         if features.shape[-1] != self.hparams.input_dim:
@@ -79,7 +79,7 @@ class IcingRiskLightningModule(pl.LightningModule):
         return self.model(features)
 
     def predict_labels(self, features: torch.Tensor, threshold: float | None = None) -> torch.Tensor:
-        """Return binary icing labels using the configured probability threshold."""
+        """설정된 확률 threshold를 기준으로 이진 결빙 라벨을 반환한다."""
         cutoff = self.hparams.threshold if threshold is None else threshold
         if not 0 < cutoff < 1:
             raise ValueError("threshold must be in the range (0, 1)")
@@ -132,3 +132,13 @@ class IcingRiskLightningModule(pl.LightningModule):
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         return torch.optim.AdamW(self.parameters(), lr=self.hparams.lr)
+
+
+class AccidentRiskLightningModule(IcingRiskLightningModule):
+    """겨울철 사고 확률을 예측하는 MLP 이진 분류기.
+
+    결빙 모델과 같은 tabular MLP 구조를 의도적으로 재사용한다.
+    두 모델 파이프라인을 쓰면 프로젝트의 기존 MLP 계열을 유지하면서도
+    "이 도로가 얼 것인가?"와 "이 장소가 제설 우선순위를 검증할 만큼
+    위험한가?"를 분리해서 설명할 수 있다.
+    """

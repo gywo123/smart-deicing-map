@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from src.deicing_models import (
+    AccidentPrediction,
     BoundingBox,
     DeicingOperation,
     DeicingZone,
@@ -117,12 +118,24 @@ def test_model_smoke_detailed():
                 predicted_at=now,
                 target_time=now + timedelta(hours=1),
                 icing_probability=0.73,
+                accident_probability=0.62,
                 predicted_surface_state=SurfaceState.ICE,
                 predicted_severity=SeverityLevel.HIGH,
                 exposure_score=1.7,
                 safety_gain_score=1.241,
                 recommended_material=MaterialType.CALCIUM_CHLORIDE,
                 recommended_spread_rate_g_m2=24,
+            )
+        ],
+        accident_predictions=[
+            AccidentPrediction(
+                segment_id="S-100",
+                predicted_at=now,
+                target_time=now + timedelta(hours=1),
+                accident_probability=0.62,
+                icing_probability=0.73,
+                exposure_score=1.7,
+                safety_gain_score=1.241,
             )
         ],
     )
@@ -134,3 +147,4 @@ def test_model_smoke_detailed():
     assert model.mobility_snapshots[0].exposure_score == 1.7
     assert model.operations[0].status == OperationStatus.COMPLETED
     assert model.predictions[0].predicted_surface_state == SurfaceState.ICE
+    assert model.accident_predictions[0].accident_probability == 0.62

@@ -4,7 +4,7 @@ import pytest
 torch = pytest.importorskip("torch")
 pl = pytest.importorskip("pytorch_lightning")
 
-from src.torch_lightning_risk_model import IcingRiskLightningModule
+from src.torch_lightning_risk_model import AccidentRiskLightningModule, IcingRiskLightningModule
 
 
 def test_lightning_module_forward_shape():
@@ -28,3 +28,11 @@ def test_lightning_module_rejects_wrong_feature_count():
     x = torch.randn(4, 7)
     with pytest.raises(ValueError, match="expected 8 features"):
         module(x)
+
+
+def test_accident_risk_module_uses_same_mlp_interface():
+    module = AccidentRiskLightningModule(input_dim=6, hidden_dims=(12,), dropout=0.0)
+    x = torch.randn(3, 6)
+    y = module(x)
+    assert y.shape == (3,)
+    assert torch.all((y >= 0) & (y <= 1))

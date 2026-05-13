@@ -1,4 +1,4 @@
-"""Detailed domain models for Smart Deicing Map."""
+"""Smart Deicing Map의 상세 도메인 데이터 모델."""
 
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ class DeicingZone(BaseModel):
     zone_id: str = Field(min_length=1)
     org_id: str = Field(min_length=1)
     zone_name: str = Field(min_length=1)
-    service_priority: int = Field(ge=1, le=5, description="1 is highest priority")
+    service_priority: int = Field(ge=1, le=5, description="1이 가장 높은 우선순위")
     center: GeoPoint
     coverage_bbox: BoundingBox
 
@@ -194,6 +194,7 @@ class RiskPrediction(BaseModel):
     predicted_at: datetime
     target_time: datetime
     icing_probability: float = Field(ge=0, le=1)
+    accident_probability: float | None = Field(default=None, ge=0, le=1)
     predicted_surface_state: SurfaceState
     predicted_severity: SeverityLevel
     exposure_score: float = Field(default=1.0, ge=0)
@@ -203,6 +204,23 @@ class RiskPrediction(BaseModel):
 
     @model_validator(mode="after")
     def validate_target_time(self) -> "RiskPrediction":
+        if self.target_time <= self.predicted_at:
+            raise ValueError("target_time must be later than predicted_at")
+        return self
+
+
+class AccidentPrediction(BaseModel):
+    segment_id: str = Field(min_length=1)
+    predicted_at: datetime
+    target_time: datetime
+    accident_probability: float = Field(ge=0, le=1)
+    icing_probability: float = Field(ge=0, le=1)
+    exposure_score: float = Field(default=1.0, ge=0)
+    safety_gain_score: float = Field(default=0.0, ge=0)
+    model_version: str = Field(default="accident-risk-mlp", min_length=1)
+
+    @model_validator(mode="after")
+    def validate_target_time(self) -> "AccidentPrediction":
         if self.target_time <= self.predicted_at:
             raise ValueError("target_time must be later than predicted_at")
         return self
@@ -234,4 +252,5 @@ class SmartDeicingMapModel(BaseModel):
     road_conditions: list[RoadCondition] = Field(default_factory=list)
     operations: list[DeicingOperation] = Field(default_factory=list)
     predictions: list[RiskPrediction] = Field(default_factory=list)
+    accident_predictions: list[AccidentPrediction] = Field(default_factory=list)
     alerts: list[AlertEvent] = Field(default_factory=list)

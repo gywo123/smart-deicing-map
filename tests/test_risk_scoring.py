@@ -4,6 +4,8 @@ from src.risk_scoring import (
     WeatherScenario,
     build_deicing_candidate,
     calculate_priority_score,
+    calculate_safety_gain_score,
+    estimate_accident_probability,
     estimate_deicing_cost_won,
     estimate_icing_risk,
     weighted_scenario_risk,
@@ -40,6 +42,8 @@ def test_weighted_scenario_risk_and_candidate_creation():
         shadow_index=0.5,
         exposure_score=0.8,
         road_width_m=8,
+        speed_limit_kmh=60,
+        accident_history_count=2,
         covered_cells=frozenset({"g1", "g2"}),
         x=1,
         y=2,
@@ -54,7 +58,33 @@ def test_weighted_scenario_risk_and_candidate_creation():
 
     assert 0 <= risk <= 1
     assert result.segment_id == "S-100"
-    assert result.priority_score == calculate_priority_score(risk, 0.8)
+    expected_accident_probability = estimate_accident_probability(risk, road)
+    assert result.accident_probability == expected_accident_probability
+    assert result.priority_score == calculate_priority_score(risk, 0.8, expected_accident_probability)
+    assert result.safety_gain_score == calculate_safety_gain_score(risk, expected_accident_probability, 0.8)
     assert result.deicing_cost_won == estimate_deicing_cost_won(road)
     assert result.candidate.candidate_id == "S-100"
     assert result.candidate.covered_cells == frozenset({"g1", "g2"})
+
+
+def test_accident_probability_increases_with_exposure_and_history():
+    low_exposure = RoadRiskFeatures(
+        "S-low",
+        length_m=500,
+        lane_count=4,
+        shadow_index=0.1,
+        exposure_score=0.1,
+        speed_limit_kmh=40,
+        accident_history_count=0,
+    )
+    high_exposure = RoadRiskFeatures(
+        "S-high",
+        length_m=500,
+        lane_count=1,
+        shadow_index=0.7,
+        exposure_score=1.0,
+        speed_limit_kmh=70,
+        accident_history_count=4,
+    )
+
+    assert estimate_accident_probability(0.6, high_exposure) > estimate_accident_probability(0.6, low_exposure)
