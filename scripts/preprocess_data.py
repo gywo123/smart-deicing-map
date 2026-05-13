@@ -12,6 +12,7 @@ from typing import Any
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+from shapely.geometry import LineString, Point
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -23,6 +24,26 @@ REPORT_DIR = PROJECT_DIR / "outputs" / "reports"
 GN_LON_MIN, GN_LON_MAX = 127.01, 127.09
 GN_LAT_MIN, GN_LAT_MAX = 37.47, 37.53
 GANGNAM_CODE = "11680"
+
+ROAD_KEEP_COLS = [
+    "LINK_ID",
+    "F_NODE",
+    "T_NODE",
+    "LANES",
+    "ROAD_RANK",
+    "ROAD_TYPE",
+    "ROAD_NAME",
+    "ROAD_USE",
+    "CONNECT",
+    "MAX_SPD",
+    "REST_VEH",
+    "REST_W",
+    "REST_H",
+    "LENGTH",
+    "cent_lon",
+    "cent_lat",
+    "geometry",
+]
 
 
 def file_head_is_lfs(path: Path) -> bool:
@@ -66,14 +87,77 @@ def fix_geometry(gdf: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, int]:
     return gdf, invalid_count
 
 
+def snap_link_endpoints_to_nodes(
+    links: gpd.GeoDataFrame,
+    nodes: gpd.GeoDataFrame,
+    max_snap_m: float = 30.0,
+) -> tuple[gpd.GeoDataFrame, dict[str, int]]:
+    """표준 노드·링크 기준에 맞게 링크 시작/종료점을 노드 좌표에 맞춘다."""
+    if links.crs != nodes.crs:
+        nodes = nodes.to_crs(links.crs)
+
+    node_map = {str(row["NODE_ID"]): row.geometry for _, row in nodes.iterrows()}
+    fixed = links.copy()
+    snapped_count = 0
+    missing_nodes = 0
+    too_far = 0
+    geometries = []
+
+    for _, row in fixed.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty or geom.geom_type != "LineString":
+            geometries.append(geom)
+            continue
+
+        coords = list(geom.coords)
+        if len(coords) < 2:
+            geometries.append(geom)
+            continue
+
+        f_node = node_map.get(str(row["F_NODE"]))
+        t_node = node_map.get(str(row["T_NODE"]))
+        if f_node is None or t_node is None:
+            missing_nodes += 1
+            geometries.append(geom)
+            continue
+
+        start_dist = Point(coords[0]).distance(f_node)
+        end_dist = Point(coords[-1]).distance(t_node)
+        if start_dist > max_snap_m or end_dist > max_snap_m:
+            too_far += 1
+            geometries.append(geom)
+            continue
+
+        if start_dist > 0.01:
+            coords[0] = (f_node.x, f_node.y)
+            snapped_count += 1
+        if end_dist > 0.01:
+            coords[-1] = (t_node.x, t_node.y)
+            snapped_count += 1
+        geometries.append(LineString(coords))
+
+    fixed["geometry"] = geometries
+    return fixed, {
+        "snapped_endpoints": snapped_count,
+        "missing_node_links": missing_nodes,
+        "snap_distance_outliers": too_far,
+    }
+
+
 def clean_roads(report: list[dict[str, Any]]) -> gpd.GeoDataFrame:
     road_path = RAW_DIR / "roads" / "[2024-03-25]NODELINKDATA" / "MOCT_LINK.shp"
+    node_path = RAW_DIR / "roads" / "[2024-03-25]NODELINKDATA" / "MOCT_NODE.shp"
     if file_head_is_lfs(road_path):
         raise FileNotFoundError(f"도로 shp가 Git LFS pointer입니다: {road_path}")
+    if file_head_is_lfs(node_path):
+        raise FileNotFoundError(f"노드 shp가 Git LFS pointer입니다: {node_path}")
 
     roads = gpd.read_file(road_path).to_crs(epsg=4326)
     raw_count = len(roads)
     candidate = roads.cx[GN_LON_MIN:GN_LON_MAX, GN_LAT_MIN:GN_LAT_MAX].copy()
+    raw_nodes = gpd.read_file(node_path).to_crs(epsg=5186)
+    candidate_metric, snap_stats = snap_link_endpoints_to_nodes(candidate.to_crs(epsg=5186), raw_nodes)
+    candidate = candidate_metric.to_crs(epsg=4326)
     metric_centroids = candidate.to_crs(epsg=5186).geometry.centroid
     lonlat_centroids = gpd.GeoSeries(metric_centroids, crs="EPSG:5186").to_crs(epsg=4326)
     candidate["cent_lon"] = lonlat_centroids.x.values
@@ -83,13 +167,19 @@ def clean_roads(report: list[dict[str, Any]]) -> gpd.GeoDataFrame:
         & candidate["cent_lat"].between(GN_LAT_MIN, GN_LAT_MAX)
     ].copy()
 
-    keep_cols = ["LINK_ID", "F_NODE", "T_NODE", "LANES", "ROAD_RANK", "MAX_SPD", "LENGTH", "cent_lon", "cent_lat", "geometry"]
+    keep_cols = [col for col in ROAD_KEEP_COLS if col in cleaned.columns]
     cleaned = cleaned[keep_cols]
     before_numeric = len(cleaned)
     cleaned["LANES"] = pd.to_numeric(cleaned["LANES"], errors="coerce").fillna(2).astype(int)
     cleaned["MAX_SPD"] = pd.to_numeric(cleaned["MAX_SPD"], errors="coerce")
     cleaned["LENGTH"] = pd.to_numeric(cleaned["LENGTH"], errors="coerce")
     cleaned["ROAD_RANK"] = cleaned["ROAD_RANK"].astype(str)
+    if "ROAD_USE" in cleaned.columns:
+        road_use = pd.to_numeric(cleaned["ROAD_USE"], errors="coerce").fillna(0)
+        unusable_count = int((road_use != 0).sum())
+        cleaned = cleaned[road_use == 0].copy()
+    else:
+        unusable_count = 0
     cleaned = cleaned.dropna(subset=["LENGTH", "geometry"])
     cleaned = cleaned[cleaned["LENGTH"] > 0]
     duplicate_count = int(cleaned["LINK_ID"].duplicated().sum())
@@ -100,6 +190,14 @@ def clean_roads(report: list[dict[str, Any]]) -> gpd.GeoDataFrame:
     cleaned.to_file(OUTPUT_DIR / "gangnam_roads_clean.geojson", driver="GeoJSON")
 
     report.append(issue("info", "roads", f"원본 도로 {raw_count:,}개 중 강남 중심점 기준 {len(cleaned):,}개 사용"))
+    if snap_stats["snapped_endpoints"]:
+        report.append(issue("info", "roads", "MOCT_NODE 기준 링크 시작/종료점 보정", snap_stats["snapped_endpoints"]))
+    if snap_stats["missing_node_links"]:
+        report.append(issue("warning", "roads", "F_NODE/T_NODE가 MOCT_NODE에 없는 링크", snap_stats["missing_node_links"]))
+    if snap_stats["snap_distance_outliers"]:
+        report.append(issue("warning", "roads", "노드와 링크 끝점 거리가 커서 스냅하지 않은 링크", snap_stats["snap_distance_outliers"]))
+    if unusable_count:
+        report.append(issue("warning", "roads", "ROAD_USE 통행불가 링크 제거", unusable_count))
     removed_by_centroid = len(candidate) - before_numeric
     if removed_by_centroid:
         report.append(issue("warning", "roads", "bbox와 걸쳤지만 중심점이 강남 범위 밖인 링크 제거", removed_by_centroid))

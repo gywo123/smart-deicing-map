@@ -405,7 +405,7 @@ def train_mlp_pipeline(pipeline: Any, config: MLPTrainingConfig | None = None) -
 
     roads = apply_risk_outputs(roads, all_probs, all_accident_probs, accident_baseline, pipeline)
     roads, selected = pipeline.hybrid_bmc_knapsack_optimize(roads, budget_ratio=0.4)
-    vehicle_route_roads, vehicle_route_coords, vehicle_meta = pipeline.vrp_route(roads, selected, n_vehicles=4)
+    vehicle_route_roads, vehicle_route_coords, vehicle_meta = pipeline.vrp_route(roads, selected)
 
     route_coords_flat: list[tuple[float, float]] = []
     for coords in vehicle_route_coords:

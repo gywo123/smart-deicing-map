@@ -12,7 +12,7 @@ import glob
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import Point
+from shapely.geometry import LineString, Point
 import networkx as nx
 from sklearn.cluster import KMeans
 import folium
@@ -73,6 +73,51 @@ def require_real_data_file(path, label):
         )
 
 
+def filter_drivable_links(gdf):
+    """표준 링크 속성의 도로사용여부를 반영해 차량 통행 가능한 링크만 남긴다."""
+    if 'ROAD_USE' not in gdf.columns:
+        return gdf
+    road_use = pd.to_numeric(gdf['ROAD_USE'], errors='coerce').fillna(0)
+    return gdf[road_use == 0].copy()
+
+
+def load_standard_node_positions():
+    """MOCT_NODE의 실제 좌표를 노드 그래프 기준점으로 읽는다."""
+    node_path = os.path.join(DATA_DIR, 'roads', '[2024-03-25]NODELINKDATA', 'MOCT_NODE.shp')
+    if not os.path.exists(node_path):
+        return {}
+    require_real_data_file(node_path, "노드 Shapefile")
+    nodes_raw = gpd.read_file(node_path)
+    nodes_metric = nodes_raw.to_crs(epsg=5179)
+    nodes_lonlat = nodes_raw.to_crs(epsg=4326)
+    positions = {}
+    for (_, metric_row), (_, lonlat_row) in zip(nodes_metric.iterrows(), nodes_lonlat.iterrows()):
+        positions[str(metric_row['NODE_ID'])] = {
+            'x': float(metric_row.geometry.x),
+            'y': float(metric_row.geometry.y),
+            'lon': float(lonlat_row.geometry.x),
+            'lat': float(lonlat_row.geometry.y),
+        }
+    return positions
+
+
+def snap_linestring_endpoints_to_node_positions(row, node_positions):
+    """LineString 첫/끝점을 F_NODE/T_NODE 좌표와 맞춘다."""
+    geom = row.geometry
+    if geom is None or geom.is_empty or geom.geom_type != 'LineString':
+        return geom
+    coords = list(geom.coords)
+    if len(coords) < 2:
+        return geom
+    f_node = node_positions.get(str(row['F_NODE']))
+    t_node = node_positions.get(str(row['T_NODE']))
+    if f_node:
+        coords[0] = (f_node['lon'], f_node['lat'])
+    if t_node:
+        coords[-1] = (t_node['lon'], t_node['lat'])
+    return LineString(coords)
+
+
 def configure_korean_font():
     """저장되는 matplotlib 차트의 한글 라벨이 깨지지 않도록 한글 폰트를 설정한다."""
     font_candidates = [
@@ -98,6 +143,7 @@ def load_roads():
     clean_path = os.path.join(CLEANED_DATA_DIR, 'gangnam_roads_clean.geojson')
     if os.path.exists(clean_path):
         gn_links = gpd.read_file(clean_path).to_crs(epsg=4326)
+        gn_links = filter_drivable_links(gn_links)
         print(f"  → 정제 도로 사용: {len(gn_links)}개")
         return gn_links
 
@@ -115,11 +161,14 @@ def load_roads():
         (candidate_links['cent_lon'].between(GN_LON_MIN, GN_LON_MAX)) &
         (candidate_links['cent_lat'].between(GN_LAT_MIN, GN_LAT_MAX))
     ].copy()
-    gn_links = gn_links[['LINK_ID', 'F_NODE', 'T_NODE', 'LANES', 'ROAD_RANK',
-                          'MAX_SPD', 'LENGTH', 'cent_lon', 'cent_lat', 'geometry']].reset_index(drop=True)
+    keep_cols = ['LINK_ID', 'F_NODE', 'T_NODE', 'LANES', 'ROAD_RANK', 'ROAD_TYPE',
+                 'ROAD_NAME', 'ROAD_USE', 'CONNECT', 'MAX_SPD', 'REST_VEH',
+                 'REST_W', 'REST_H', 'LENGTH', 'cent_lon', 'cent_lat', 'geometry']
+    gn_links = gn_links[[col for col in keep_cols if col in gn_links.columns]].reset_index(drop=True)
 
     gn_links['LANES'] = pd.to_numeric(gn_links['LANES'], errors='coerce').fillna(2).astype(int)
     gn_links['LENGTH'] = pd.to_numeric(gn_links['LENGTH'], errors='coerce')
+    gn_links = filter_drivable_links(gn_links)
     gn_links = gn_links[gn_links['LENGTH'] > 0].drop_duplicates('LINK_ID').reset_index(drop=True)
     gn_links['ROAD_RANK'] = gn_links['ROAD_RANK'].astype(str)
 
@@ -488,13 +537,39 @@ def hybrid_bmc_knapsack_optimize(
 # ============================================================
 # 10. VRP 경로 생성 (다중 제설차)
 # ============================================================
+def choose_vehicle_count(sel, min_vehicles=2, max_vehicles=8):
+    """작업량과 연결 컴포넌트 규모에 따라 필요한 제설차 대수를 자동 추정한다."""
+    total_length_km = float(sel['LENGTH'].sum() / 1000.0)
+    total_deicing_kg = float(sel['deicing_kg'].sum())
+    by_length = int(np.ceil(total_length_km / 55.0))
+    by_load = int(np.ceil(total_deicing_kg / 12000.0))
+    by_road_count = int(np.ceil(len(sel) / 280.0))
+
+    selected_graph = nx.Graph()
+    for _, row in sel.iterrows():
+        selected_graph.add_edge(str(row['F_NODE']), str(row['T_NODE']))
+    significant_components = 0
+    if selected_graph.number_of_edges() > 0:
+        component_nodes = list(nx.connected_components(selected_graph))
+        for nodes in component_nodes:
+            edge_count = selected_graph.subgraph(nodes).number_of_edges()
+            if edge_count >= 15:
+                significant_components += 1
+
+    estimated = max(min_vehicles, by_length, by_load, by_road_count, min(significant_components, max_vehicles))
+    return int(np.clip(estimated, min_vehicles, max_vehicles))
+
+
 def priority_biased_nearest_route(vehicle_df, depot_xy):
     coords = vehicle_df[['x', 'y']].values
     priority = vehicle_df['priority_score'].values
     priority_norm = priority / max(float(priority.max()), 1e-9)
     n = len(vehicle_df)
 
-    start_pos = int(np.argmax(priority))
+    radial_dist = np.sqrt(((coords - depot_xy) ** 2).sum(axis=1))
+    radial_norm = radial_dist / max(float(radial_dist.max()), 1e-9)
+    start_score = 0.70 * radial_norm + 0.30 * priority_norm
+    start_pos = int(np.argmax(start_score))
     visited = np.zeros(n, dtype=bool)
     route = [start_pos]
     visited[start_pos] = True
@@ -563,10 +638,39 @@ def rebalance_vehicle_loads(sel, n_vehicles, vehicle_capacity_kg):
 
 
 def build_road_network_router(roads_gdf):
-    """도로 링크 geometry로 이동 경로용 그래프와 최근접 노드 탐색기를 만든다."""
-    roads_5179 = roads_gdf[['LINK_ID', 'geometry']].copy().to_crs(epsg=5179)
-    roads_4326 = roads_gdf[['LINK_ID', 'geometry']].copy().to_crs(epsg=4326)
-    graph = nx.Graph()
+    """F_NODE/T_NODE 차량흐름 방향을 반영한 표준 노드·링크 그래프를 만든다."""
+    node_positions = load_standard_node_positions()
+    router_cols = ['LINK_ID', 'F_NODE', 'T_NODE', 'LENGTH', 'ROAD_USE', 'geometry']
+    router_source = roads_gdf[[col for col in router_cols if col in roads_gdf.columns]].copy().to_crs(epsg=4326)
+
+    raw_road_path = os.path.join(DATA_DIR, 'roads', '[2024-03-25]NODELINKDATA', 'MOCT_LINK.shp')
+    try:
+        if os.path.exists(raw_road_path):
+            require_real_data_file(raw_road_path, "도로 Shapefile")
+            raw_roads = gpd.read_file(raw_road_path).to_crs(epsg=4326)
+            raw_roads = filter_drivable_links(raw_roads)
+            margin = 0.015
+            raw_roads = raw_roads.cx[
+                GN_LON_MIN - margin:GN_LON_MAX + margin,
+                GN_LAT_MIN - margin:GN_LAT_MAX + margin,
+            ].copy()
+            raw_roads = raw_roads[[col for col in router_cols if col in raw_roads.columns]]
+            raw_roads['LENGTH'] = pd.to_numeric(raw_roads['LENGTH'], errors='coerce')
+            router_source = pd.concat([router_source, raw_roads], ignore_index=True)
+            router_source = router_source.drop_duplicates('LINK_ID').dropna(subset=['LENGTH'])
+    except Exception as exc:
+        print(f"  → 원본 도로망 보강 생략: {exc}")
+
+    router_source = filter_drivable_links(router_source)
+    if node_positions:
+        router_source['geometry'] = router_source.apply(
+            lambda row: snap_linestring_endpoints_to_node_positions(row, node_positions),
+            axis=1,
+        )
+
+    roads_5179 = router_source[['LINK_ID', 'F_NODE', 'T_NODE', 'LENGTH', 'geometry']].copy().to_crs(epsg=5179)
+    roads_4326 = router_source[['LINK_ID', 'F_NODE', 'T_NODE', 'LENGTH', 'geometry']].copy().to_crs(epsg=4326)
+    graph = nx.DiGraph()
 
     for (_, metric_row), (_, lonlat_row) in zip(roads_5179.iterrows(), roads_4326.iterrows()):
         metric_coords = list(metric_row.geometry.coords)
@@ -574,24 +678,35 @@ def build_road_network_router(roads_gdf):
         if len(metric_coords) < 2:
             continue
 
-        for idx in range(len(metric_coords) - 1):
-            x1, y1 = metric_coords[idx]
-            x2, y2 = metric_coords[idx + 1]
-            node_a = (round(float(x1), 1), round(float(y1), 1))
-            node_b = (round(float(x2), 1), round(float(y2), 1))
-            lon_a, lat_a = lonlat_coords[idx]
-            lon_b, lat_b = lonlat_coords[idx + 1]
-            graph.add_node(node_a, lon=float(lon_a), lat=float(lat_a))
-            graph.add_node(node_b, lon=float(lon_b), lat=float(lat_b))
-            length_m = float(np.hypot(x2 - x1, y2 - y1))
-            if graph.has_edge(node_a, node_b):
-                if length_m < graph[node_a][node_b]['weight']:
-                    graph[node_a][node_b]['weight'] = length_m
-            else:
-                graph.add_edge(node_a, node_b, weight=length_m)
+        node_a = str(metric_row['F_NODE'])
+        node_b = str(metric_row['T_NODE'])
+        start_pos = node_positions.get(node_a)
+        end_pos = node_positions.get(node_b)
+        if start_pos:
+            graph.add_node(node_a, **start_pos)
+        else:
+            x1, y1 = metric_coords[0]
+            lon_a, lat_a = lonlat_coords[0]
+            graph.add_node(node_a, x=float(x1), y=float(y1), lon=float(lon_a), lat=float(lat_a))
+        if end_pos:
+            graph.add_node(node_b, **end_pos)
+        else:
+            x2, y2 = metric_coords[-1]
+            lon_b, lat_b = lonlat_coords[-1]
+            graph.add_node(node_b, x=float(x2), y=float(y2), lon=float(lon_b), lat=float(lat_b))
+
+        length_m = float(metric_row['LENGTH']) if pd.notna(metric_row['LENGTH']) else float(metric_row.geometry.length)
+        edge_coords = [(float(lon), float(lat)) for lon, lat in lonlat_coords]
+        if graph.has_edge(node_a, node_b):
+            if length_m < graph[node_a][node_b]['weight']:
+                graph[node_a][node_b]['weight'] = length_m
+                graph[node_a][node_b]['coords'] = edge_coords
+                graph[node_a][node_b]['link_id'] = str(metric_row['LINK_ID'])
+        else:
+            graph.add_edge(node_a, node_b, weight=length_m, coords=edge_coords, link_id=str(metric_row['LINK_ID']))
 
     node_keys = list(graph.nodes)
-    node_xy = np.asarray(node_keys, dtype=float)
+    node_xy = np.asarray([[graph.nodes[node]['x'], graph.nodes[node]['y']] for node in node_keys], dtype=float)
 
     def nearest_node(x, y):
         if len(node_xy) == 0:
@@ -602,45 +717,96 @@ def build_road_network_router(roads_gdf):
     return graph, nearest_node
 
 
+def append_unique_coords(target, coords):
+    """연속 좌표 배열에 중복 끝점을 만들지 않고 좌표를 붙인다."""
+    for coord in coords:
+        coord = [float(coord[0]), float(coord[1])]
+        if not target or target[-1] != coord:
+            target.append(coord)
+
+
+def path_nodes_to_coords(graph, path_nodes):
+    """최단경로 노드열을 실제 링크 segment 좌표열로 변환한다."""
+    coords = []
+    for start, end in zip(path_nodes[:-1], path_nodes[1:]):
+        edge_coords = graph[start][end].get('coords')
+        if not edge_coords:
+            start_attrs = graph.nodes[start]
+            end_attrs = graph.nodes[end]
+            edge_coords = [
+                (float(start_attrs['lon']), float(start_attrs['lat'])),
+                (float(end_attrs['lon']), float(end_attrs['lat'])),
+            ]
+
+        start_attrs = graph.nodes[start]
+        expected_start = [float(start_attrs['lon']), float(start_attrs['lat'])]
+        segment = [[float(lon), float(lat)] for lon, lat in edge_coords]
+        if segment and segment[0] != expected_start:
+            segment = list(reversed(segment))
+        append_unique_coords(coords, segment)
+    return coords
+
+
 def road_network_movement_path(route_roads, graph, nearest_node):
-    """작업 도로 사이 이동선을 중심점 직선이 아니라 도로망 최단경로로 복원한다."""
+    """차량 이동/도포 전체 궤적을 실제 도로망과 링크 geometry만으로 만든다."""
     if len(route_roads) == 0 or graph.number_of_nodes() == 0:
-        return [], 0.0
+        return [], 0.0, 0
 
-    route_metric = route_roads[['geometry']].copy().to_crs(epsg=5179)
-    service_nodes = []
-    for geom in route_metric.geometry:
-        centroid = geom.centroid
-        node = nearest_node(centroid.x, centroid.y)
-        if node is not None:
-            service_nodes.append(node)
-
-    if not service_nodes:
-        return [], 0.0
-
-    movement_nodes = [service_nodes[0]]
-    total_distance_m = 0.0
-    for start, end in zip(service_nodes[:-1], service_nodes[1:]):
-        if start == end:
-            continue
-        try:
-            path_nodes = nx.shortest_path(graph, start, end, weight='weight')
-            total_distance_m += float(nx.shortest_path_length(graph, start, end, weight='weight'))
-            movement_nodes.extend(path_nodes[1:])
-        except (nx.NetworkXNoPath, nx.NodeNotFound):
-            movement_nodes.append(end)
-
+    route_metric = route_roads[['F_NODE', 'T_NODE', 'geometry']].copy().to_crs(epsg=5179)
+    route_lonlat = route_roads[['F_NODE', 'T_NODE', 'geometry']].copy().to_crs(epsg=4326)
     movement_coords = []
-    for node in movement_nodes:
-        attrs = graph.nodes[node]
-        coord = [float(attrs['lon']), float(attrs['lat'])]
-        if not movement_coords or movement_coords[-1] != coord:
-            movement_coords.append(coord)
+    total_distance_m = 0.0
+    skipped_connectors = 0
+    current_node = None
 
-    return movement_coords, total_distance_m
+    for (_, metric_row), (_, lonlat_row) in zip(route_metric.iterrows(), route_lonlat.iterrows()):
+        metric_geom = metric_row.geometry
+        lonlat_geom = lonlat_row.geometry
+        metric_coords = list(metric_geom.coords)
+        lonlat_coords = [[float(lon), float(lat)] for lon, lat in lonlat_geom.coords]
+        if len(metric_coords) < 2 or len(lonlat_coords) < 2:
+            continue
+
+        forward_start = str(metric_row['F_NODE'])
+        forward_end = str(metric_row['T_NODE'])
+        if forward_start not in graph:
+            forward_start = nearest_node(metric_coords[0][0], metric_coords[0][1])
+        if forward_end not in graph:
+            forward_end = nearest_node(metric_coords[-1][0], metric_coords[-1][1])
+        if forward_start is None or forward_end is None:
+            continue
+
+        service_options = [(forward_start, forward_end, lonlat_coords)]
+
+        if current_node is None:
+            start_node, end_node, service_coords = service_options[0]
+        else:
+            ranked_options = []
+            for start_node_option, end_node_option, coords_option in service_options:
+                try:
+                    connector_len = float(nx.shortest_path_length(graph, current_node, start_node_option, weight='weight'))
+                    ranked_options.append((connector_len, start_node_option, end_node_option, coords_option))
+                except (nx.NetworkXNoPath, nx.NodeNotFound):
+                    continue
+
+            if not ranked_options:
+                skipped_connectors += 1
+                continue
+
+            _, start_node, end_node, service_coords = min(ranked_options, key=lambda item: item[0])
+            connector_nodes = nx.shortest_path(graph, current_node, start_node, weight='weight')
+            connector_coords = path_nodes_to_coords(graph, connector_nodes)
+            append_unique_coords(movement_coords, connector_coords)
+            total_distance_m += float(nx.shortest_path_length(graph, current_node, start_node, weight='weight'))
+
+        append_unique_coords(movement_coords, service_coords)
+        total_distance_m += float(metric_geom.length)
+        current_node = end_node
+
+    return movement_coords, total_distance_m, skipped_connectors
 
 
-def vrp_route(roads_gdf, selected_ids, n_vehicles=4):
+def vrp_route(roads_gdf, selected_ids, n_vehicles=None):
     print("\nVRP 경로 도출 (다중 제설차 휴리스틱)...")
 
     sel = roads_gdf[roads_gdf['LINK_ID'].isin(selected_ids)].copy()
@@ -648,7 +814,6 @@ def vrp_route(roads_gdf, selected_ids, n_vehicles=4):
         print("  → 선택 도로가 없어 VRP를 건너뜁니다.")
         return [], [], []
 
-    n_vehicles = min(n_vehicles, len(sel))
     sel['orig_index'] = sel.index
     sel = sel.reset_index(drop=True)
     sel_metric = sel[['LINK_ID', 'geometry']].copy().to_crs(epsg=5179)
@@ -656,6 +821,11 @@ def vrp_route(roads_gdf, selected_ids, n_vehicles=4):
     sel['x'] = centroids.x.values
     sel['y'] = centroids.y.values
     sel['deicing_kg'] = sel['area'] * 0.03
+
+    if n_vehicles is None or n_vehicles == 'auto':
+        n_vehicles = choose_vehicle_count(sel)
+        print(f"  → 자동 산정 제설차: {n_vehicles}대")
+    n_vehicles = min(int(n_vehicles), len(sel))
 
     coords = sel[['x', 'y']].values
     kmeans = KMeans(n_clusters=n_vehicles, random_state=42, n_init=10)
@@ -666,7 +836,8 @@ def vrp_route(roads_gdf, selected_ids, n_vehicles=4):
     sel['vehicle_id'] = rebalance_vehicle_loads(sel, n_vehicles, vehicle_capacity_kg)
 
     depot_xy = coords.mean(axis=0)
-    colors = ['#1565c0', '#e53935', '#2e7d32', '#8e24aa', '#f57c00', '#00897b']
+    colors = ['#1565c0', '#e53935', '#2e7d32', '#8e24aa',
+              '#f57c00', '#00897b', '#6d4c41', '#3949ab']
     road_graph, nearest_road_node = build_road_network_router(roads_gdf)
 
     vehicle_route_roads = []
@@ -684,10 +855,13 @@ def vrp_route(roads_gdf, selected_ids, n_vehicles=4):
         route, dist_m = priority_biased_nearest_route(vehicle_df, depot_xy)
         route_roads = vehicle_df.iloc[route].reset_index(drop=True)
         route_coords = route_roads[['cent_lon', 'cent_lat']].values.tolist()
-        movement_coords, movement_dist_m = road_network_movement_path(route_roads, road_graph, nearest_road_node)
+        movement_coords, movement_dist_m, skipped_connectors = road_network_movement_path(
+            route_roads,
+            road_graph,
+            nearest_road_node,
+        )
         if movement_coords:
-            service_dist_m = float(route_roads['LENGTH'].sum())
-            dist_m = movement_dist_m + service_dist_m
+            dist_m = movement_dist_m
 
         original_indices = route_roads['orig_index'].values
         roads_gdf.loc[original_indices, 'vehicle_id'] = vehicle_id + 1
@@ -700,13 +874,14 @@ def vrp_route(roads_gdf, selected_ids, n_vehicles=4):
             'distance_km': round(dist_m / 1000, 1),
             'movement_coords': movement_coords,
             'movement_points': int(len(movement_coords)),
+            'skipped_connectors': int(skipped_connectors),
             'avg_risk': float(route_roads['risk'].mean()),
             'total_cacl2_kg': float(route_roads['deicing_kg'].sum()),
             'vehicle_capacity_kg': float(vehicle_capacity_kg),
             'load_pct': float(route_roads['deicing_kg'].sum() / vehicle_capacity_kg),
             'budget_million_won': float(route_roads['deicing_cost'].sum() / 1e6),
-            'start_lat': float(route_coords[0][1]),
-            'start_lon': float(route_coords[0][0]),
+            'start_lat': float(movement_coords[0][1]) if movement_coords else float(route_coords[0][1]),
+            'start_lon': float(movement_coords[0][0]) if movement_coords else float(route_coords[0][0]),
         }
 
         vehicle_route_roads.append(route_roads)
@@ -716,6 +891,8 @@ def vrp_route(roads_gdf, selected_ids, n_vehicles=4):
         print(f"  {meta['name']}: {meta['roads']}개 도로, "
               f"{meta['distance_km']}km, 적재율={meta['load_pct']:.0%}, "
               f"평균 위험도={meta['avg_risk']:.3f}")
+        if skipped_connectors:
+            print(f"    - 도로망 연결 실패 구간 {skipped_connectors}개는 직선 이동선 없이 제외")
 
     total_dist = sum(v['distance_km'] for v in vehicle_meta)
     print(f"\n  → 전체 VRP 경로: {total_dist:.1f}km ({len(vehicle_meta)}대 제설차)")
@@ -968,7 +1145,8 @@ def create_maps(roads_gdf, route_coords, vehicle_route_roads=None, vehicle_route
                     opacity=0.45,
                     tooltip=f"{meta['name']} 도로망 이동 경로",
                 ).add_to(m2)
-            start_point = first_route_point(route_roads_z)
+            start_point = [float(meta.get('start_lat', route_roads_z.iloc[0]['cent_lat'])),
+                           float(meta.get('start_lon', route_roads_z.iloc[0]['cent_lon']))]
             end_point = last_route_point(route_roads_z)
             folium.Marker(start_point, icon=folium.Icon(color='green'),
                           popup=f"{meta['name']} 출발").add_to(m2)
@@ -1057,7 +1235,8 @@ def create_maps(roads_gdf, route_coords, vehicle_route_roads=None, vehicle_route
                     tooltip=f"{meta['name']} 도로망 이동 경로",
                 ).add_to(m4)
 
-            start_point = first_route_point(route_roads_z)
+            start_point = [float(meta.get('start_lat', route_roads_z.iloc[0]['cent_lat'])),
+                           float(meta.get('start_lon', route_roads_z.iloc[0]['cent_lon']))]
             folium.Marker(
                 start_point,
                 icon=folium.DivIcon(html=(
@@ -1294,7 +1473,7 @@ def main():
     roads = calculate_baseline_risk(roads, weather)
     roads = calculate_priority(roads)
     roads, selected = hybrid_bmc_knapsack_optimize(roads, budget_ratio=0.4)
-    vehicle_route_roads, vehicle_route_coords, vehicle_meta = vrp_route(roads, selected, n_vehicles=4)
+    vehicle_route_roads, vehicle_route_coords, vehicle_meta = vrp_route(roads, selected)
 
     route_coords_flat = []
     for vehicle_coords in vehicle_route_coords:

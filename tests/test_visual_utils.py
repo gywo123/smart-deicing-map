@@ -1,6 +1,15 @@
 import pytest
+import geopandas as gpd
+import pandas as pd
+import networkx as nx
+from shapely.geometry import LineString
 
-from scripts.main_pipeline import require_real_data_file
+from scripts import main_pipeline
+from scripts.main_pipeline import (
+    build_road_network_router,
+    choose_vehicle_count,
+    require_real_data_file,
+)
 from scripts.route_visualization import _estimate_deicing_kg, bearing_label
 from scripts.shadow_utils import solar_position_kst
 
@@ -14,6 +23,21 @@ def test_bearing_label_cardinal_directions():
 
 def test_estimate_deicing_kg_uses_pipeline_default_when_rate_missing():
     assert _estimate_deicing_kg({"area": 2000}) == pytest.approx(60)
+
+
+def test_choose_vehicle_count_scales_with_workload():
+    rows = []
+    for idx in range(600):
+        rows.append(
+            {
+                "F_NODE": f"N{idx}",
+                "T_NODE": f"N{idx + 1}",
+                "LENGTH": 500,
+                "deicing_kg": 120,
+            }
+        )
+
+    assert choose_vehicle_count(pd.DataFrame(rows)) >= 6
 
 
 def test_solar_position_kst_returns_reasonable_winter_noon_elevation():
@@ -34,3 +58,24 @@ def test_require_real_data_file_rejects_git_lfs_pointer(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="Git LFS pointer"):
         require_real_data_file(str(pointer), "도로 Shapefile")
+
+
+def test_road_router_uses_directed_node_link_flow(monkeypatch, tmp_path):
+    monkeypatch.setattr(main_pipeline, "DATA_DIR", str(tmp_path))
+    roads = gpd.GeoDataFrame(
+        {
+            "LINK_ID": ["L1"],
+            "F_NODE": ["A"],
+            "T_NODE": ["B"],
+            "LENGTH": [100.0],
+            "ROAD_USE": [0],
+            "geometry": [LineString([(127.0, 37.0), (127.001, 37.0)])],
+        },
+        crs="EPSG:4326",
+    )
+
+    graph, _ = build_road_network_router(roads)
+
+    assert isinstance(graph, nx.DiGraph)
+    assert graph.has_edge("A", "B")
+    assert not graph.has_edge("B", "A")
