@@ -7,6 +7,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import os
+import sys
 import glob
 import numpy as np
 import pandas as pd
@@ -21,6 +22,11 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
 try:
     from scripts.route_visualization import create_navigation_simulation_map
@@ -37,6 +43,7 @@ OUTPUTS_DIR = os.path.join(BASE_DIR, 'outputs')
 MAPS_DIR = os.path.join(OUTPUTS_DIR, 'maps')
 FIGURES_DIR = os.path.join(OUTPUTS_DIR, 'figures')
 OUTPUT_DATA_DIR = os.path.join(OUTPUTS_DIR, 'data')
+CLEANED_DATA_DIR = os.path.join(OUTPUT_DATA_DIR, 'cleaned')
 REPORTS_DIR = os.path.join(OUTPUTS_DIR, 'reports')
 
 for directory in [MODELS_DIR, MAPS_DIR, FIGURES_DIR, OUTPUT_DATA_DIR, REPORTS_DIR]:
@@ -88,6 +95,12 @@ configure_korean_font()
 # ============================================================
 def load_roads():
     print("[1/6] 도로 네트워크 로딩...")
+    clean_path = os.path.join(CLEANED_DATA_DIR, 'gangnam_roads_clean.geojson')
+    if os.path.exists(clean_path):
+        gn_links = gpd.read_file(clean_path).to_crs(epsg=4326)
+        print(f"  → 정제 도로 사용: {len(gn_links)}개")
+        return gn_links
+
     road_path = os.path.join(DATA_DIR, 'roads', '[2024-03-25]NODELINKDATA', 'MOCT_LINK.shp')
     require_real_data_file(road_path, "도로 Shapefile")
     links = gpd.read_file(road_path)
@@ -126,6 +139,15 @@ def load_buildings_and_shadow(roads_gdf):
 # ============================================================
 def load_weather():
     print("[3/6] 기상 데이터 로딩...")
+    clean_path = os.path.join(CLEANED_DATA_DIR, 'weather_winter_clean.csv')
+    if os.path.exists(clean_path):
+        winter = pd.read_csv(clean_path)
+        if '일시' in winter.columns:
+            winter['일시'] = pd.to_datetime(winter['일시'], errors='coerce')
+        print(f"  → 정제 겨울철 기상 데이터 사용: {len(winter)}행")
+        print(f"  → 영하 비율: {(winter['temp'] <= 0).mean():.1%}")
+        return winter
+
     asos_files = sorted(glob.glob(os.path.join(DATA_DIR, 'weather', 'OBS_ASOS_TIM_*.csv')))
 
     main_cols = ['일시', '기온(°C)', '강수량(mm)', '풍속(m/s)', '습도(%)',
@@ -173,58 +195,63 @@ def load_weather():
 # ============================================================
 def load_population_and_map(roads_gdf):
     print("[4/6] 유동인구 데이터 로딩 + 도로 매핑...")
-    pop_dirs = [
-        os.path.join(DATA_DIR, 'population', '250_LOCAL_RESD_202501'),
-        os.path.join(DATA_DIR, 'population', '250_LOCAL_RESD_202512'),
-    ]
+    clean_path = os.path.join(CLEANED_DATA_DIR, 'population_grid_clean.csv')
+    if os.path.exists(clean_path):
+        valid_grids = pd.read_csv(clean_path)
+        print(f"  → 정제 생활인구 격자 사용: {len(valid_grids)}개")
+    else:
+        pop_dirs = [
+            os.path.join(DATA_DIR, 'population', '250_LOCAL_RESD_202501'),
+            os.path.join(DATA_DIR, 'population', '250_LOCAL_RESD_202512'),
+        ]
 
-    dfs = []
-    for d in pop_dirs:
-        for f in sorted(glob.glob(os.path.join(d, '*.csv'))):
-            df = pd.read_csv(f, encoding='cp949')
-            df.columns = [c.strip().strip('"') for c in df.columns]
-            dfs.append(df[['행정동코드', '250M격자', '시간', '생활인구합계']])
+        dfs = []
+        for d in pop_dirs:
+            for f in sorted(glob.glob(os.path.join(d, '*.csv'))):
+                df = pd.read_csv(f, encoding='cp949')
+                df.columns = [c.strip().strip('"') for c in df.columns]
+                dfs.append(df[['행정동코드', '250M격자', '시간', '생활인구합계']])
 
-    pop = pd.concat(dfs, ignore_index=True)
-    pop['행정동코드'] = pop['행정동코드'].astype(str)
-    gn_pop = pop[pop['행정동코드'].str.startswith(GANGNAM_CODE)].copy()
-    gn_pop['생활인구합계'] = pd.to_numeric(
-        gn_pop['생활인구합계'].astype(str).str.replace('*', '0'), errors='coerce'
-    ).fillna(0)
+        pop = pd.concat(dfs, ignore_index=True)
+        pop['행정동코드'] = pop['행정동코드'].astype(str)
+        gn_pop = pop[pop['행정동코드'].str.startswith(GANGNAM_CODE)].copy()
+        gn_pop['생활인구합계'] = pd.to_numeric(
+            gn_pop['생활인구합계'].astype(str).str.replace('*', '0'), errors='coerce'
+        ).fillna(0)
 
-    grid_avg = gn_pop.groupby('250M격자')['생활인구합계'].mean().reset_index()
-    grid_avg.columns = ['grid_id', 'avg_pop']
+        grid_avg = gn_pop.groupby('250M격자')['생활인구합계'].mean().reset_index()
+        grid_avg.columns = ['grid_id', 'avg_pop']
 
-    import pyproj
-    transformer = pyproj.Transformer.from_crs('EPSG:5179', 'EPSG:4326', always_xy=True)
+        import pyproj
+        transformer = pyproj.Transformer.from_crs('EPSG:5179', 'EPSG:4326', always_xy=True)
 
-    grid_lons_list, grid_lats_list = [], []
-    for gid in grid_avg['grid_id']:
-        gid_str = str(gid)
-        nums = gid_str.replace('다사', '')
-        if len(nums) >= 8:
-            x_5179 = 900000 + int(nums[:4]) * 10
-            y_5179 = 1900000 + int(nums[4:8]) * 10
-            lon, lat = transformer.transform(x_5179, y_5179)
-            grid_lons_list.append(lon)
-            grid_lats_list.append(lat)
-        else:
-            grid_lons_list.append(0)
-            grid_lats_list.append(0)
+        grid_lons_list, grid_lats_list = [], []
+        for gid in grid_avg['grid_id']:
+            gid_str = str(gid)
+            nums = gid_str.replace('다사', '')
+            if len(nums) >= 8:
+                x_5179 = 900000 + int(nums[:4]) * 10
+                y_5179 = 1900000 + int(nums[4:8]) * 10
+                lon, lat = transformer.transform(x_5179, y_5179)
+                grid_lons_list.append(lon)
+                grid_lats_list.append(lat)
+            else:
+                grid_lons_list.append(0)
+                grid_lats_list.append(0)
 
-    grid_avg['grid_lon'] = grid_lons_list
-    grid_avg['grid_lat'] = grid_lats_list
+        grid_avg['grid_lon'] = grid_lons_list
+        grid_avg['grid_lat'] = grid_lats_list
 
-    valid_grids = grid_avg[
-        (grid_avg['grid_lon'] >= GN_LON_MIN) & (grid_avg['grid_lon'] <= GN_LON_MAX) &
-        (grid_avg['grid_lat'] >= GN_LAT_MIN) & (grid_avg['grid_lat'] <= GN_LAT_MAX)
-    ].copy()
+        valid_grids = grid_avg[
+            (grid_avg['grid_lon'] >= GN_LON_MIN) & (grid_avg['grid_lon'] <= GN_LON_MAX) &
+            (grid_avg['grid_lat'] >= GN_LAT_MIN) & (grid_avg['grid_lat'] <= GN_LAT_MAX)
+        ].copy()
 
-    if len(valid_grids) == 0:
-        valid_grids = grid_avg.copy()
+        if len(valid_grids) == 0:
+            valid_grids = grid_avg.copy()
 
-    pop_max = valid_grids['avg_pop'].max()
-    valid_grids['pop_weight'] = valid_grids['avg_pop'] / max(pop_max, 1)
+        pop_max = valid_grids['avg_pop'].max()
+        valid_grids['pop_weight'] = valid_grids['avg_pop'] / max(pop_max, 1)
 
     pop_weights = []
     grid_lons = valid_grids['grid_lon'].values
