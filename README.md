@@ -57,6 +57,54 @@ conda activate mh_ai311
 C:\Users\USER\miniconda3\envs\mh_ai311\python.exe --version
 ```
 
+## 3-1. 새 컴퓨터/새 환경에서 처음 설치
+
+Python 라이브러리를 한 번에 설치하는 파일은 `requirements.txt`다.
+
+가장 간단한 설치:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+다만 Windows에서는 `geopandas`, `pyogrio`, `pyproj`, `shapely` 같은 공간정보 라이브러리가 pip에서 꼬일 수 있다. 그래서 새 환경에서는 Conda용 `environment.yml` 사용을 더 권장한다.
+
+Conda 새 환경 생성:
+
+```powershell
+conda env create -f environment.yml
+conda activate smart-deicing
+```
+
+이미 같은 이름의 환경이 있으면 갱신:
+
+```powershell
+conda env update -f environment.yml --prune
+conda activate smart-deicing
+```
+
+설치 확인:
+
+```powershell
+python -c "import geopandas, torch, pytorch_lightning, folium; print('OK')"
+python -m pytest tests
+```
+
+GPU 확인:
+
+```powershell
+python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
+새 환경 기준 전체 실행:
+
+```powershell
+python scripts\preprocess_data.py
+python scripts\main_pipeline.py
+python scripts\train_mlp_pipeline.py
+python -m pytest tests
+```
+
 ## 4. 데이터 전처리
 
 원본 데이터를 정제해서 `outputs/data/cleaned` 아래에 저장한다.
@@ -233,4 +281,3 @@ python scripts\main_pipeline.py
 - 위험구간 커버: `12.7% -> 97.3%`
 - 염화칼슘 사용량: 약 `22.8%` 절감
 - 테스트: `29 passed`
-

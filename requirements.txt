@@ -1,0 +1,25 @@
+# Smart Deicing Map runtime requirements
+# Python 3.11 기준. Windows에서 GeoPandas/GDAL 설치가 꼬이면 environment.yml 사용을 권장한다.
+
+numpy==1.26.4
+pandas==2.3.3
+geopandas==1.1.1
+shapely==2.0.6
+pyproj==3.6.1
+pyogrio==0.10.0
+
+folium==0.20.0
+branca==0.8.2
+xyzservices==2025.11.0
+matplotlib==3.10.6
+networkx==3.6.1
+
+scikit-learn==1.8.0
+torch==2.5.1
+pytorch-lightning==2.6.0
+torchmetrics==1.8.2
+
+pydantic==2.12.5
+openpyxl==3.1.5
+pypdf==6.11.0
+pytest==9.0.3
