@@ -1,0 +1,27 @@
+{
+  "mode": "statistical_validation_simulation",
+  "description": "지점별 실제 사고 라벨이 없어서 강남구 날씨별 사고 통계와 노면상태 시간대 통계를 이용해 시점별 도로상황 관측값을 생성하고 예측 위험도와 비교한다.",
+  "data_sources": [
+    "outputs/data/gangnam_roads_result.geojson",
+    "outputs/data/cleaned/weather_winter_clean.csv",
+    "data/raw/reference/accidents/교통사고통계_20260510.xlsx",
+    "data/raw/reference/accidents/교통사고통계_20260322.xlsx"
+  ],
+  "metrics": {
+    "samples": 497280,
+    "actual_event_rate": 0.3931,
+    "threshold": 0.5,
+    "precision": 0.558,
+    "recall": 0.5673,
+    "f1": 0.5626,
+    "average_precision": 0.5524,
+    "roc_auc": 0.6692
+  },
+  "outputs": {
+    "events_sample": "C:\\Users\\USER\\Desktop\\smart-deicing-map-codex-71uq2a\\outputs\\reports\\validation_events_sample.csv",
+    "road_summary": "C:\\Users\\USER\\Desktop\\smart-deicing-map-codex-71uq2a\\outputs\\reports\\validation_road_summary.csv",
+    "figure": "C:\\Users\\USER\\Desktop\\smart-deicing-map-codex-71uq2a\\outputs\\figures\\validation_simulation.png",
+    "map": "C:\\Users\\USER\\Desktop\\smart-deicing-map-codex-71uq2a\\outputs\\maps\\map_validation_simulation.html"
+  },
+  "note": "실제 좌표/시각 단위 사고 또는 도로결빙 관측 데이터가 확보되면 actual_event 컬럼을 해당 데이터로 교체하면 된다."
+}

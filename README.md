@@ -102,6 +102,7 @@ python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_
 python scripts\preprocess_data.py
 python scripts\main_pipeline.py
 python scripts\train_mlp_pipeline.py
+python scripts\validation_simulation.py
 python -m pytest tests
 ```
 
@@ -163,9 +164,12 @@ outputs/maps/map_optimal_route.html
 outputs/maps/map_priority_heatmap.html
 outputs/maps/map_navigation_route.html
 outputs/maps/map_navigation_simulation.html
+outputs/maps/map_validation_simulation.html
 outputs/reports/simulation_results.json
 outputs/reports/route_navigation.json
+outputs/reports/validation_simulation.json
 outputs/figures/simulation_comparison.png
+outputs/figures/validation_simulation.png
 ```
 
 ## 6. MLP 학습 및 모델 내보내기
@@ -219,6 +223,49 @@ outputs/maps/map_navigation_simulation.html
 - `map_optimal_route.html`: 제설 대상 도로와 차량별 작업 구역
 - `map_navigation_route.html`: 제설차별 경로와 상세 카드
 - `map_navigation_simulation.html`: 재생형 제설차 이동 시뮬레이션
+- `map_validation_simulation.html`: 예측 위험도와 시점별 관측 상황 비교 지도
+
+## 7-1. 예측 위험도 검증 시뮬레이션
+
+현재 보유한 사고 자료는 도로 좌표별 실제 사고 라벨이 아니라, 강남구 날씨별 사고 통계와 노면상태/시간대별 사고 통계다. 그래서 실제 지점별 사고 라벨을 확보하기 전까지는 통계 기반 검증 시뮬레이션으로 예측 위험도와 관측 상황을 비교한다.
+
+검증 흐름:
+
+```text
+예측 위험도 + 사고확률
++ 해당 시점 기상 상황
++ 강남구 날씨별 사고 통계
++ 노면상태/시간대별 사고 통계
+-> 시점별/도로별 관측 이벤트 생성
+-> 예측 위험도와 관측 이벤트 비교
+```
+
+실행:
+
+```powershell
+python scripts\validation_simulation.py
+```
+
+Conda 파이썬 직접 실행:
+
+```powershell
+C:\Users\USER\miniconda3\envs\mh_ai311\python.exe scripts\validation_simulation.py
+```
+
+출력:
+
+```text
+outputs/reports/validation_simulation.json
+outputs/reports/validation_events_sample.csv
+outputs/reports/validation_road_summary.csv
+outputs/figures/validation_simulation.png
+outputs/maps/map_validation_simulation.html
+```
+
+주의:
+
+- 이 검증은 실제 좌표별 사고 라벨이 없는 상태의 통계 기반 시뮬레이션이다.
+- 실제 사고 좌표/시간 또는 도로 결빙 관측 데이터가 들어오면 `actual_event`를 그 데이터로 교체하면 된다.
 
 ## 8. 테스트
 
@@ -244,6 +291,7 @@ C:\Users\USER\miniconda3\envs\mh_ai311\python.exe -m pytest tests
 python scripts\preprocess_data.py
 python scripts\main_pipeline.py
 python scripts\train_mlp_pipeline.py
+python scripts\validation_simulation.py
 python -m pytest tests
 ```
 
@@ -252,6 +300,7 @@ python -m pytest tests
 ```powershell
 python scripts\main_pipeline.py
 python scripts\train_mlp_pipeline.py
+python scripts\validation_simulation.py
 python -m pytest tests
 ```
 

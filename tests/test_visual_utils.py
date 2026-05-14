@@ -12,6 +12,7 @@ from scripts.main_pipeline import (
 )
 from scripts.route_visualization import _estimate_deicing_kg, bearing_label
 from scripts.shadow_utils import solar_position_kst
+from scripts.validation_simulation import scenario_severity, weather_bucket
 
 
 def test_bearing_label_cardinal_directions():
@@ -79,3 +80,17 @@ def test_road_router_uses_directed_node_link_flow(monkeypatch, tmp_path):
     assert isinstance(graph, nx.DiGraph)
     assert graph.has_edge("A", "B")
     assert not graph.has_edge("B", "A")
+
+
+def test_validation_weather_bucket_and_severity():
+    weather = pd.DataFrame(
+        [
+            {"일시": pd.Timestamp("2025-01-01 06:00"), "temp": -5, "ground_temp": -2, "humidity": 90, "wind": 4, "precip": 0, "snow": 2},
+            {"일시": pd.Timestamp("2025-01-01 12:00"), "temp": 3, "ground_temp": 2, "humidity": 50, "wind": 1, "precip": 0, "snow": 0},
+        ]
+    )
+
+    assert weather_bucket(weather.iloc[0]) == "눈"
+    assert weather_bucket(weather.iloc[1]) == "맑음"
+    severity = scenario_severity(weather)
+    assert severity[0] > severity[1]
