@@ -72,7 +72,7 @@ def load_buildings_and_shadow(
     if data_dir is None:
         data_dir = DEFAULT_DATA_DIR
     if hours is None:
-        hours = list(range(7, 17))
+        hours = list(range(24))
     if not hours:
         raise ValueError("hours must contain at least one hour")
 
