@@ -45,6 +45,8 @@ FIGURES_DIR = os.path.join(OUTPUTS_DIR, 'figures')
 OUTPUT_DATA_DIR = os.path.join(OUTPUTS_DIR, 'data')
 CLEANED_DATA_DIR = os.path.join(OUTPUT_DATA_DIR, 'cleaned')
 REPORTS_DIR = os.path.join(OUTPUTS_DIR, 'reports')
+CONFIG_DIR = os.path.join(BASE_DIR, 'config')
+DEFAULT_DEICING_COST_CONFIG_PATH = os.path.join(CONFIG_DIR, 'deicing_costs.json')
 
 for directory in [MODELS_DIR, MAPS_DIR, FIGURES_DIR, OUTPUT_DATA_DIR, REPORTS_DIR]:
     os.makedirs(directory, exist_ok=True)
@@ -52,6 +54,57 @@ for directory in [MODELS_DIR, MAPS_DIR, FIGURES_DIR, OUTPUT_DATA_DIR, REPORTS_DI
 GN_LON_MIN, GN_LON_MAX = 127.01, 127.09
 GN_LAT_MIN, GN_LAT_MAX = 37.47, 37.53
 GANGNAM_CODE = '11680'
+
+DEFAULT_DEICING_COST_CONFIG = {
+    'unit_spread_kg_per_m2': 0.03,
+    'material_cost_won_per_kg': 300.0,
+    'labor_cost_won_per_km': 50000.0,
+    'environmental_cost_won_per_kg': 0.0,
+    'default_road_width_m': 8.0,
+    'road_width_by_rank_m': {
+        '101': 30.0,
+        '102': 25.0,
+        '103': 20.0,
+        '104': 8.0,
+        '105': 6.0,
+        '106': 6.0,
+        '107': 4.0,
+        '108': 4.0,
+    },
+}
+
+
+def load_deicing_cost_config(path=None):
+    """제설 비용/살포량 설정을 JSON에서 읽고 누락값은 기본값으로 보완한다."""
+    config_path = path or os.environ.get('DEICING_COST_CONFIG', DEFAULT_DEICING_COST_CONFIG_PATH)
+    config = {
+        **DEFAULT_DEICING_COST_CONFIG,
+        'road_width_by_rank_m': DEFAULT_DEICING_COST_CONFIG['road_width_by_rank_m'].copy(),
+    }
+    if os.path.exists(config_path):
+        with open(config_path, 'r', encoding='utf-8') as f:
+            loaded = json.load(f)
+        config.update({key: value for key, value in loaded.items() if key != 'road_width_by_rank_m'})
+        if isinstance(loaded.get('road_width_by_rank_m'), dict):
+            config['road_width_by_rank_m'].update({
+                str(key): float(value)
+                for key, value in loaded['road_width_by_rank_m'].items()
+            })
+
+    positive_keys = [
+        'unit_spread_kg_per_m2',
+        'material_cost_won_per_kg',
+        'labor_cost_won_per_km',
+        'default_road_width_m',
+    ]
+    for key in positive_keys:
+        config[key] = float(config[key])
+        if config[key] <= 0:
+            raise ValueError(f"{key} must be positive")
+    config['environmental_cost_won_per_kg'] = float(config.get('environmental_cost_won_per_kg', 0.0))
+    if config['environmental_cost_won_per_kg'] < 0:
+        raise ValueError("environmental_cost_won_per_kg must be non-negative")
+    return config
 
 
 def ensure_output_dirs():
@@ -400,19 +453,27 @@ def calculate_priority(roads_gdf):
     print("\n우선순위 산정...")
     roads_gdf['priority_score'] = roads_gdf['risk'] * (0.7 + 0.3 * roads_gdf['pop_weight'])
 
-    road_width_map = {'101': 30, '102': 25, '103': 20, '104': 8, '105': 6,
-                      '106': 6, '107': 4, '108': 4}
-    roads_gdf['road_width'] = roads_gdf['ROAD_RANK'].map(road_width_map).fillna(8)
+    cost_config = load_deicing_cost_config()
+    road_width_map = cost_config['road_width_by_rank_m']
+    roads_gdf['road_width'] = roads_gdf['ROAD_RANK'].astype(str).map(road_width_map).fillna(
+        cost_config['default_road_width_m']
+    )
     roads_gdf['area'] = roads_gdf['LENGTH'] * roads_gdf['road_width']
 
-    UNIT_SPREAD = 0.03  # kg/m²
-    UNIT_COST = 300     # 원/kg
-    LABOR_PER_KM = 50000
+    unit_spread = cost_config['unit_spread_kg_per_m2']
+    material_cost = cost_config['material_cost_won_per_kg']
+    environmental_cost = cost_config['environmental_cost_won_per_kg']
+    labor_per_km = cost_config['labor_cost_won_per_km']
+    roads_gdf['deicing_kg'] = roads_gdf['area'] * unit_spread
     roads_gdf['deicing_cost'] = (
-        roads_gdf['area'] * UNIT_SPREAD * UNIT_COST +
-        roads_gdf['LENGTH'] / 1000 * LABOR_PER_KM
+        roads_gdf['deicing_kg'] * (material_cost + environmental_cost) +
+        roads_gdf['LENGTH'] / 1000 * labor_per_km
     )
 
+    print(
+        f"  → 비용 설정: 살포량={unit_spread:.3f}kg/m², "
+        f"재료비={material_cost:.0f}원/kg, 인건비={labor_per_km:.0f}원/km"
+    )
     print(f"  → 총 제설 비용 (전체): {roads_gdf['deicing_cost'].sum()/1e6:.1f}백만원")
     print(f"  → 우선순위 점수: 평균={roads_gdf['priority_score'].mean():.3f}, "
           f"최대={roads_gdf['priority_score'].max():.3f}")
@@ -820,7 +881,9 @@ def vrp_route(roads_gdf, selected_ids, n_vehicles=None):
     centroids = sel_metric.geometry.centroid
     sel['x'] = centroids.x.values
     sel['y'] = centroids.y.values
-    sel['deicing_kg'] = sel['area'] * 0.03
+    if 'deicing_kg' not in sel.columns:
+        cost_config = load_deicing_cost_config()
+        sel['deicing_kg'] = sel['area'] * cost_config['unit_spread_kg_per_m2']
 
     if n_vehicles is None or n_vehicles == 'auto':
         n_vehicles = choose_vehicle_count(sel)
@@ -1362,9 +1425,14 @@ def run_simulation(roads_gdf):
     ai_risk_sum = roads_gdf.loc[ai_mask, 'risk'].sum()
 
     # 지표 2: 염화칼슘 사용량
-    UNIT_SPREAD = 0.03
-    bl_cacl2 = roads_gdf.loc[baseline_mask, 'area'].sum() * UNIT_SPREAD / 1000
-    ai_cacl2 = roads_gdf.loc[ai_mask, 'area'].sum() * UNIT_SPREAD / 1000
+    if 'deicing_kg' in roads_gdf.columns:
+        bl_cacl2 = roads_gdf.loc[baseline_mask, 'deicing_kg'].sum() / 1000
+        ai_cacl2 = roads_gdf.loc[ai_mask, 'deicing_kg'].sum() / 1000
+    else:
+        cost_config = load_deicing_cost_config()
+        unit_spread = cost_config['unit_spread_kg_per_m2']
+        bl_cacl2 = roads_gdf.loc[baseline_mask, 'area'].sum() * unit_spread / 1000
+        ai_cacl2 = roads_gdf.loc[ai_mask, 'area'].sum() * unit_spread / 1000
 
     # 지표 3: 유동인구 커버율
     total_pop = roads_gdf['pop_weight'].sum()

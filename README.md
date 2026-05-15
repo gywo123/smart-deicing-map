@@ -33,6 +33,7 @@ smart-deicing-map-codex-71uq2a/
 ├─ data/                 원본 데이터
 ├─ models/               학습된 모델 파일
 ├─ outputs/              지도, 리포트, 정제 데이터 출력
+├─ config/               제설 비용/살포량 설정
 ├─ scripts/              실행 스크립트
 ├─ src/                  모델/점수/계획 모듈
 ├─ tests/                테스트 코드
@@ -153,6 +154,45 @@ Conda 파이썬 직접 실행:
 
 ```powershell
 C:\Users\USER\miniconda3\envs\mh_ai311\python.exe scripts\main_pipeline.py
+```
+
+## 5-1. 제설 비용/살포량 설정
+
+제설 비용과 도포량은 코드에 직접 박지 않고 `config/deicing_costs.json`에서 읽는다.
+
+```json
+{
+  "unit_spread_kg_per_m2": 0.03,
+  "material_cost_won_per_kg": 300,
+  "labor_cost_won_per_km": 50000,
+  "environmental_cost_won_per_kg": 0,
+  "default_road_width_m": 8,
+  "road_width_by_rank_m": {
+    "101": 30,
+    "102": 25,
+    "103": 20,
+    "104": 8,
+    "105": 6,
+    "106": 6,
+    "107": 4,
+    "108": 4
+  }
+}
+```
+
+단가나 살포량을 바꾸고 싶으면 이 JSON만 수정한 뒤 다시 실행한다.
+
+```powershell
+python scripts\main_pipeline.py
+python scripts\train_mlp_pipeline.py
+python scripts\validation_simulation.py
+```
+
+다른 설정 파일을 임시로 쓰고 싶으면 환경변수로 지정할 수 있다.
+
+```powershell
+$env:DEICING_COST_CONFIG="C:\path\to\deicing_costs.json"
+python scripts\main_pipeline.py
 ```
 
 주요 출력:
