@@ -18,11 +18,8 @@
 현재 기준:
 
 - 메인 모델: PyTorch Lightning 기반 MLP
-- XGBoost 사용 안 함
-- MCMF 사용 안 함
 - 도로 연결: `F_NODE -> T_NODE` 기준 방향 그래프
 - 노드 보정: `MOCT_NODE` 좌표 기준으로 링크 시작/종료점 보정
-- 그림자 날짜: `1월 15일` 고정
 - 그림자 시간대: `0시~23시` 전체 시간대 기준
 - 제설차 수: 작업량에 따라 자동 산정
 
@@ -42,21 +39,12 @@ smart-deicing-map-codex-71uq2a/
 
 GitHub에는 필요에 따라 코드와 일부 `outputs`만 올린다. 일반적으로 `data/`, `models/`, `.venv/`는 올리지 않는다.
 
-## 3. 실행 환경
-
-권장 환경은 Conda의 `mh_ai311` 환경이다.
 
 PowerShell에서 실행:
 
 ```powershell
 conda activate mh_ai311
-```
-
-또는 Conda activate가 안 잡힐 때는 파이썬을 직접 지정한다.
-
-```powershell
-C:\Users\USER\miniconda3\envs\mh_ai311\python.exe --version
-```
+````
 
 ## 3-1. 새 컴퓨터/새 환경에서 처음 설치
 
@@ -229,7 +217,7 @@ C:\Users\USER\miniconda3\envs\mh_ai311\python.exe scripts\train_mlp_pipeline.py
 GPU가 잡히면 로그에 다음처럼 표시된다.
 
 ```text
-학습 장치: GPU - NVIDIA GeForce RTX 4060 Laptop GPU
+학습 장치: GPU - NVIDIA GeForce RTX 5090
 GPU available: True (cuda), used: True
 ```
 
