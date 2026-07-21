@@ -3,8 +3,11 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-data/
-models/
-outputs/
+.pytest_*/
+/data/
+models/*.ckpt
 .vscode/
+.agents/
 2026-Engineering-Industry-Contest-main/
+*.log
+*.tmp

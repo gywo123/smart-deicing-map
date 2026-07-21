@@ -2,7 +2,7 @@ import pytest
 import geopandas as gpd
 import pandas as pd
 import networkx as nx
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Point
 
 from scripts import main_pipeline
 from scripts.main_pipeline import (
@@ -14,7 +14,11 @@ from scripts.main_pipeline import (
 )
 from scripts.route_visualization import _estimate_deicing_kg, bearing_label
 from scripts.shadow_utils import solar_position_kst
-from scripts.validation_simulation import scenario_severity, weather_bucket
+from scripts.validation_simulation import (
+    evaluate_hotspot_risk_ranking,
+    scenario_severity,
+    weather_bucket,
+)
 
 
 def test_bearing_label_cardinal_directions():
@@ -96,6 +100,41 @@ def test_validation_weather_bucket_and_severity():
     assert weather_bucket(weather.iloc[1]) == "맑음"
     severity = scenario_severity(weather)
     assert severity[0] > severity[1]
+
+
+def test_hotspot_validation_uses_all_local_roads_not_highest_only():
+    roads = gpd.GeoDataFrame(
+        {
+            "LINK_ID": ["low", "middle", "high", "far"],
+            "risk": [0.1, 0.4, 0.9, 0.2],
+            "geometry": [
+                LineString([(-2, 0), (2, 0)]),
+                LineString([(-2, 0.5), (2, 0.5)]),
+                LineString([(-2, -0.5), (2, -0.5)]),
+                LineString([(-2, 10), (2, 10)]),
+            ],
+        },
+        crs="EPSG:5186",
+    )
+    hotspots = gpd.GeoDataFrame(
+        {
+            "cluster_id": [1],
+            "locations": [["테스트 지점"]],
+            "years": [[2024]],
+            "source_records": [1],
+            "accidents": [2.0],
+            "casualties": [2.0],
+            "geometry": [Point(0, 0)],
+        },
+        crs="EPSG:5186",
+    )
+
+    _, matches = evaluate_hotspot_risk_ranking(roads, hotspots)
+
+    assert matches.loc[0, "local_link_count"] == 3
+    assert matches.loc[0, "risk_percentile"] < matches.loc[
+        0, "risk_percentile_max_descriptive_only"
+    ]
 
 
 def test_deicing_cost_config_drives_priority_cost(monkeypatch, tmp_path):

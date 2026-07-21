@@ -9,6 +9,7 @@ warnings.filterwarnings('ignore')
 import os
 import sys
 import glob
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -37,6 +38,8 @@ except ModuleNotFoundError:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == 'scripts' else SCRIPT_DIR
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, 'data', 'raw')
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
 OUTPUTS_DIR = os.path.join(BASE_DIR, 'outputs')
@@ -376,73 +379,6 @@ def load_population_and_map(roads_gdf):
     print(f"  → 강남구 격자: {len(valid_grids)}개")
     print(f"  → 도로 유동인구 가중치: 평균 {np.mean(pop_weights):.3f}, "
           f"최대 {np.max(pop_weights):.3f}")
-    return roads_gdf
-
-
-# ============================================================
-# 5. 설명 가능한 기상 + 도로 기반 결빙 위험도 baseline
-# ============================================================
-def robust_scale_series(values):
-    """이상치 영향을 줄인 0~1 분위수 정규화."""
-    arr = np.asarray(values, dtype=float)
-    low = float(np.nanpercentile(arr, 5))
-    high = float(np.nanpercentile(arr, 95))
-    return np.clip((arr - low) / max(high - low, 1e-6), 0, 1)
-
-
-def calculate_baseline_risk(roads_gdf, weather):
-    """MLP 입력용 연속 결빙 위험 baseline을 만든다."""
-    print("\n결빙 위험도 baseline 계산 (기상 + 도로 + 그림자)...")
-
-    winter_cold = weather[weather['temp'] <= 0].copy()
-    if len(winter_cold) < 10:
-        winter_cold = weather.nsmallest(100, 'temp')
-
-    scenarios = [
-        {'name': '한파', 'temp': winter_cold['temp'].quantile(0.1),
-         'humidity': winter_cold['humidity'].quantile(0.8),
-         'wind': winter_cold['wind'].quantile(0.8),
-         'ground_temp': winter_cold['ground_temp'].quantile(0.1),
-         'snow': winter_cold['snow'].quantile(0.9)},
-        {'name': '보통 영하', 'temp': winter_cold['temp'].median(),
-         'humidity': winter_cold['humidity'].median(),
-         'wind': winter_cold['wind'].median(),
-         'ground_temp': winter_cold['ground_temp'].median(),
-         'snow': winter_cold['snow'].median()},
-        {'name': '경미 결빙', 'temp': -1.0,
-         'humidity': 65,
-         'wind': 2.0,
-         'ground_temp': 0.5,
-         'snow': 0.0},
-    ]
-
-    shadow = robust_scale_series(roads_gdf['shadow_index'].values)
-    length = robust_scale_series(roads_gdf['LENGTH'].values)
-    lanes = pd.to_numeric(roads_gdf['LANES'], errors='coerce').fillna(2).to_numpy(dtype=float)
-    lane_risk = np.clip((3.5 - np.minimum(lanes, 3.5)) / 2.5, 0, 1)
-    road_risk = 0.55 * shadow + 0.25 * lane_risk + 0.20 * length
-
-    scenario_risks = []
-    for sc in scenarios:
-        freeze_score = 0.0
-        freeze_score += np.clip((3.0 - sc['temp']) / 16.0, 0, 1) * 0.32
-        freeze_score += np.clip((2.0 - sc['ground_temp']) / 10.0, 0, 1) * 0.28
-        freeze_score += np.clip(sc['snow'] / 8.0, 0, 1) * 0.18
-        freeze_score += np.clip((sc['humidity'] - 55.0) / 40.0, 0, 1) * 0.14
-        freeze_score += np.clip(sc['wind'] / 12.0, 0, 1) * 0.08
-        risk = 0.58 * road_risk + 0.42 * freeze_score
-        risk = np.clip(risk, 0, 1)
-        scenario_risks.append(risk)
-        print(f"  {sc['name']}: 기온={sc['temp']:.1f}°C → "
-              f"위험도 평균={risk.mean():.3f}, 범위=[{risk.min():.3f}, {risk.max():.3f}]")
-
-    weights = [0.3, 0.5, 0.2]
-    combined_risk = sum(w * r for w, r in zip(weights, scenario_risks))
-    combined_risk = np.clip(combined_risk, 0, 1)
-
-    roads_gdf['risk'] = combined_risk
-    print(f"\n  → 가중 평균 위험도: 평균={combined_risk.mean():.3f}, "
-          f"표준편차={combined_risk.std():.3f}")
     return roads_gdf
 
 
@@ -1390,12 +1326,12 @@ def create_maps(roads_gdf, route_coords, vehicle_route_roads=None, vehicle_route
 
 
 # ============================================================
-# 12. 검증 시뮬레이션
+# 12. 내부 정책 비교 시뮬레이션
 # ============================================================
 def run_simulation(roads_gdf):
     ensure_output_dirs()
     print("\n" + "="*60)
-    print("검증 시뮬레이션: 기존 균등살포 vs AI 최적화")
+    print("내부 정책 비교: 도로등급 baseline vs 제안 최적화")
     print("="*60)
 
     total_cost = roads_gdf['deicing_cost'].sum()
@@ -1445,7 +1381,7 @@ def run_simulation(roads_gdf):
     bl_eff = bl_risk_sum / max(bl_spent, 1) * 1e6
     ai_eff = ai_risk_sum / max(ai_spent, 1) * 1e6
 
-    print(f"\n{'지표':<30} {'기존(균등)':<15} {'AI 최적화':<15} {'개선':<10}")
+    print(f"\n{'지표':<30} {'도로등급 기준':<15} {'제안 최적화':<15} {'차이':<10}")
     print("-" * 70)
     print(f"{'선택 도로 수':<29} {baseline_mask.sum():<15} {ai_mask.sum():<15}")
     print(f"{'사용 예산(백만원)':<27} {bl_spent/1e6:<15.1f} {ai_spent/1e6:<15.1f}")
@@ -1456,6 +1392,15 @@ def run_simulation(roads_gdf):
     print(f"{'비용 효율성(위험/백만원)':<25} {bl_eff:<15.2f} {ai_eff:<15.2f} {(ai_eff/max(bl_eff,1)-1):+.1%}")
 
     results = {
+        'schema_version': 2,
+        'evaluation_type': 'internal_policy_simulation',
+        'external_ground_truth_used': False,
+        'baseline_definition': 'ROAD_RANK ascending order until the same budget is exhausted',
+        'proposed_definition': 'MLP-derived relative risk plus Hybrid BMC/Knapsack selection',
+        'warning': (
+            '이 결과는 같은 계산 위험도와 비용을 사용한 내부 정책 비교이며 '
+            '현장 사고 감소율이나 도로 결빙 정확도가 아니다.'
+        ),
         'budget_million_won': round(budget / 1e6, 1),
         'baseline': {
             'roads': int(baseline_mask.sum()),
@@ -1495,15 +1440,15 @@ def run_simulation(roads_gdf):
 
     x = np.arange(len(categories))
     w = 0.35
-    axes[0].bar(x - w/2, bl_vals, w, label='기존(균등)', color='#90a4ae')
-    axes[0].bar(x + w/2, ai_vals, w, label='AI 최적화', color='#e53935')
+    axes[0].bar(x - w/2, bl_vals, w, label='도로등급 기준', color='#90a4ae')
+    axes[0].bar(x + w/2, ai_vals, w, label='제안 최적화', color='#e53935')
     axes[0].set_xticks(x)
     axes[0].set_xticklabels(categories)
     axes[0].set_ylim(0, 1.1)
     axes[0].legend()
     axes[0].set_title('성능 비교')
 
-    axes[1].bar(['기존', 'AI'], [bl_cacl2, ai_cacl2], color=['#90a4ae', '#43a047'])
+    axes[1].bar(['도로등급', '제안'], [bl_cacl2, ai_cacl2], color=['#90a4ae', '#43a047'])
     axes[1].set_title('염화칼슘 사용량 (톤)')
     axes[1].set_ylabel('톤')
 
@@ -1538,7 +1483,18 @@ def main():
     weather = load_weather()
     roads = load_population_and_map(roads)
 
-    roads = calculate_baseline_risk(roads, weather)
+    model_path = os.path.join(MODELS_DIR, 'road_surface_temperature_mlp.pt')
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(
+            "실측 노면온도 MLP가 없습니다. "
+            "python scripts\\train_mlp_pipeline.py를 먼저 실행하세요."
+        )
+    from src.road_surface_temperature_mlp import apply_mlp_road_risk, load_model_bundle
+    from src.mlp_training_pipeline import load_road_weather
+
+    bundle = load_model_bundle(Path(model_path))
+    road_weather = load_road_weather(Path(BASE_DIR))
+    roads = apply_mlp_road_risk(roads, weather, road_weather, bundle)
     roads = calculate_priority(roads)
     roads, selected = hybrid_bmc_knapsack_optimize(roads, budget_ratio=0.4)
     vehicle_route_roads, vehicle_route_coords, vehicle_meta = vrp_route(roads, selected)

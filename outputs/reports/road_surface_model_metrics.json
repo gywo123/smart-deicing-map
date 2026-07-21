@@ -1,0 +1,120 @@
+{
+  "schema_version": 3,
+  "model_version": "road_surface_temperature_residual_mlp_v2",
+  "model_type": "PyTorch Lightning residual MLP regression",
+  "target": "KMA observed road-surface temperature at +3h",
+  "label_source": "KMA road weather station 13402 observed road-surface temperature",
+  "pseudo_label_used": false,
+  "evaluation_scope": "observed_road_surface_temperature_temporal_holdout",
+  "forecast_horizon_hours": 3,
+  "features": [
+    "temp",
+    "ground_temp_now",
+    "ground_temp_lag_1h",
+    "temp_6h_mean",
+    "humidity",
+    "dewpoint_depression",
+    "wind",
+    "precip_6h",
+    "snow",
+    "new_snow_6h",
+    "solar",
+    "solar_3h_sum",
+    "sunshine",
+    "hour_sin",
+    "hour_cos",
+    "day_sin",
+    "day_cos",
+    "road_surface_temp_now",
+    "road_surface_temp_lag_1h",
+    "road_surface_temp_lag_2h",
+    "road_surface_temp_lag_3h",
+    "road_surface_temp_lag_6h",
+    "road_surface_temp_mean_3h",
+    "road_surface_temp_mean_6h",
+    "road_surface_temp_change_1h",
+    "road_surface_temp_change_3h"
+  ],
+  "development_range": [
+    "2024-11-01T10:00:00",
+    "2025-03-01T00:00:00"
+  ],
+  "calibration_period": "2025-11",
+  "test_period": "2025-12",
+  "development_rows": 2846,
+  "calibration_rows": 710,
+  "test_rows": 724,
+  "selected_epochs": 42,
+  "regression": {
+    "rmse_c": 1.0637802416283124,
+    "mae_c": 0.8044503458327412,
+    "r2": 0.9456853214078392,
+    "bias_observed_minus_predicted_c": -0.0320774928056918,
+    "skill_vs_road_persistence_rmse": 0.6123448595504997
+  },
+  "freezing": {
+    "rows": 724,
+    "observed_freeze_rate": 0.27071823204419887,
+    "brier_score": 0.04327788216652442,
+    "decision_threshold": 0.5,
+    "precision": 0.9575757575757575,
+    "recall": 0.8061224489795918,
+    "f1": 0.8753462603878116,
+    "pr_auc": 0.9759734727602455,
+    "roc_auc": 0.9909651360544217
+  },
+  "baselines": {
+    "current_road_surface_temperature_persistence": {
+      "rmse_c": 2.7441406823467385,
+      "mae_c": 2.0312712644754503,
+      "r2": 0.6385684007097914,
+      "bias_observed_minus_predicted_c": -0.06056629834254143
+    },
+    "issue_air_temperature": {
+      "rmse_c": 3.161470859572482,
+      "mae_c": 2.140168321003839,
+      "r2": 0.5202756743989333,
+      "bias_observed_minus_predicted_c": 1.2964114149264911
+    },
+    "issue_asos_ground_temperature": {
+      "rmse_c": 3.554733154616095,
+      "mae_c": 2.638497050285607,
+      "r2": 0.3935047771585526,
+      "bias_observed_minus_predicted_c": 1.8046987077441707
+    }
+  },
+  "holdout_used_for_training_or_calibration": false,
+  "actual_road_surface_temperature_validated": true,
+  "road_icing_state_validated": false,
+  "interpretation": "지표는 강남 인접 경부선 원지 관측소의 실측 노면온도 및 0C 이하 사건 성능이다. 강남 전체 도로별 결빙 정확도나 사고확률로 해석하지 않는다.",
+  "uncertainty": {
+    "rmse_c_95pct": [
+      0.998706490970904,
+      1.1285422732544503
+    ],
+    "mae_c_95pct": [
+      0.7540911614030031,
+      0.8537410813654216
+    ],
+    "freeze_pr_auc_95pct": [
+      0.9621850562219659,
+      0.9868389435168219
+    ],
+    "bootstrap_iterations": 1000,
+    "seed": 42
+  },
+  "slices": {
+    "near_freezing_observed_minus3_to_plus3_c": {
+      "rows": 274,
+      "rmse_c": 0.8456642049738311,
+      "mae_c": 0.6331107475699227,
+      "r2": 0.7229110580912537,
+      "bias_observed_minus_predicted_c": -0.04973040782168976
+    }
+  },
+  "model_artifact": {
+    "path": "models/road_surface_temperature_mlp.pt",
+    "sha256": "675b6a519d8b7e791bf0854bb45e9e09e83c21945553ec62309914a93c7eeee3",
+    "bytes": 244930
+  }
+}

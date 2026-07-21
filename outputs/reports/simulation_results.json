@@ -1,0 +1,32 @@
+{
+  "schema_version": 2,
+  "evaluation_type": "internal_policy_simulation",
+  "external_ground_truth_used": false,
+  "baseline_definition": "ROAD_RANK ascending order until the same budget is exhausted",
+  "proposed_definition": "MLP-derived relative risk plus Hybrid BMC/Knapsack selection",
+  "warning": "이 결과는 같은 계산 위험도와 비용을 사용한 내부 정책 비교이며 현장 사고 감소율이나 도로 결빙 정확도가 아니다.",
+  "budget_million_won": 30.4,
+  "baseline": {
+    "roads": 471,
+    "spent_million": 30.3,
+    "risk_coverage": 0.1608,
+    "weighted_risk_coverage": 0.2235,
+    "cacl2_tons": 77.67,
+    "pop_coverage": 0.1872,
+    "efficiency": 9.14
+  },
+  "ai": {
+    "roads": 1525,
+    "spent_million": 30.3,
+    "risk_coverage": 0.8674,
+    "weighted_risk_coverage": 0.7423,
+    "cacl2_tons": 60.3,
+    "pop_coverage": 0.8122,
+    "efficiency": 30.36
+  },
+  "improvement": {
+    "risk_coverage_pp": 70.7,
+    "cacl2_reduction_pct": 22.4,
+    "pop_coverage_pp": 62.5
+  }
+}

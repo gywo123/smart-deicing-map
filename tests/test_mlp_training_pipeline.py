@@ -6,132 +6,116 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("pytorch_lightning")
 
-from src.mlp_training_pipeline import (  # noqa: E402
+from src.ground_temperature_mlp import (  # noqa: E402
     FEATURES,
-    build_accident_pseudo_labels,
-    build_physical_icing_baseline,
-    classification_metrics,
-    get_trainer_device_config,
-    prepare_icing_features,
-    refresh_shadow_index_if_possible,
-    resolve_roads_geojson_path,
-    soften_probabilities,
+    MODEL_VERSION,
+    build_forecast_dataset,
+    freeze_probability,
+    split_temporal_years,
+    validate_model_bundle,
+    weather_moisture_index,
 )
+from src.mlp_training_pipeline import load_enriched_weather  # noqa: E402
 
 
-def _roads_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "shadow_index": [0.1, 0.3, 0.8, 1.0, 0.0],
-            "pop_weight": [0.2, 0.4, 0.9, 1.0, 0.1],
-            "LENGTH": [100, 200, 600, 800, 150],
-            "LANES": [4, 3, 2, 1, 5],
-            "road_width": [8, 8, 10, 6, 12],
-            "area": [800, 1600, 6000, 4800, 1800],
-            "deicing_cost": [1000, 2000, 6000, 8000, 1500],
-            "risk": [0.1, 0.3, 0.7, 0.9, 0.2],
-        }
+def _weather_frame() -> pd.DataFrame:
+    rows = []
+    for year in [2021, 2022, 2023, 2024]:
+        for hour in range(8):
+            timestamp = pd.Timestamp(year=year, month=1, day=1, hour=hour)
+            temp = -4 + hour * 0.5
+            ground = temp - 1
+            rows.append(
+                {
+                    "일시": timestamp,
+                    "temp": temp,
+                    "ground_temp": ground,
+                    "ground_temp_lag_1h": ground - 0.5,
+                    "temp_6h_mean": temp - 0.5,
+                    "humidity": 85,
+                    "dewpoint_depression": 1.5,
+                    "wind": 2,
+                    "precip_6h": 0.5,
+                    "snow": 1,
+                    "new_snow_6h": 0.2,
+                    "solar": 0,
+                    "solar_3h_sum": 0,
+                    "sunshine": 0,
+                    "hour_sin": np.sin(2 * np.pi * hour / 24),
+                    "hour_cos": np.cos(2 * np.pi * hour / 24),
+                    "day_sin": 0,
+                    "day_cos": 1,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_features_exclude_cost_and_formula_outputs():
+    forbidden = {"deicing_cost", "area", "priority_score", "risk", "accident_probability"}
+    assert forbidden.isdisjoint(FEATURES)
+    assert {"temp", "ground_temp_now", "precip_6h", "snow", "solar"}.issubset(FEATURES)
+
+
+def test_forecast_dataset_uses_exact_future_timestamp():
+    dataset = build_forecast_dataset(_weather_frame(), horizon_hours=3)
+
+    assert not dataset.empty
+    assert (dataset["valid_time"] - dataset["issue_time"] == pd.Timedelta(hours=3)).all()
+    assert np.allclose(dataset["target_delta"], 1.5)
+
+
+def test_temporal_split_reserves_latest_two_years():
+    dataset = build_forecast_dataset(_weather_frame(), horizon_hours=3)
+    development, calibration, test, years = split_temporal_years(dataset)
+
+    assert set(development["valid_time"].dt.year) == {2021, 2022}
+    assert set(calibration["valid_time"].dt.year) == {2023}
+    assert set(test["valid_time"].dt.year) == {2024}
+    assert years == {"calibration_year": 2023, "test_year": 2024}
+
+
+def test_freeze_probability_decreases_as_temperature_rises():
+    calibrator = {"coefficient": -2.0, "intercept": 0.0}
+    probabilities = freeze_probability(np.array([-2.0, 0.0, 2.0]), calibrator)
+
+    assert probabilities[0] > probabilities[1] > probabilities[2]
+
+
+def test_moisture_index_responds_to_precipitation_and_snow():
+    dry = _weather_frame().iloc[:1].copy()
+    wet = dry.copy()
+    dry[["precip_6h", "snow", "new_snow_6h"]] = 0
+    dry["humidity"] = 40
+    dry["dewpoint_depression"] = 10
+    wet[["precip_6h", "snow", "new_snow_6h"]] = [3, 4, 2]
+
+    assert weather_moisture_index(wet)[0] > weather_moisture_index(dry)[0]
+
+
+def test_load_enriched_weather_rejects_old_schema(tmp_path):
+    output = tmp_path / "outputs" / "data" / "cleaned"
+    output.mkdir(parents=True)
+    pd.DataFrame({"일시": ["2025-01-01"], "ground_temp": [-1]}).to_csv(
+        output / "weather_winter_clean.csv", index=False
     )
 
-
-def test_prepare_icing_features_normalizes_and_labels():
-    x, y, scaler = prepare_icing_features(_roads_frame())
-
-    assert x.shape == (5, len(FEATURES))
-    assert y.shape == (5,)
-    assert set(y.tolist()) == {0.0, 1.0}
-    assert scaler["label_threshold"] == pytest.approx(0.46)
-    assert len(scaler["mean"]) == len(FEATURES)
+    with pytest.raises(ValueError, match="이전 형식"):
+        load_enriched_weather(tmp_path)
 
 
-def test_build_accident_pseudo_labels_outputs_probability_range():
-    roads = _roads_frame()
-    labels, scores, threshold = build_accident_pseudo_labels(
-        roads,
-        icing_probs=np.array([0.1, 0.3, 0.7, 0.9, 0.2], dtype=np.float32),
-    )
+def test_model_bundle_schema_rejects_wrong_feature_order():
+    bundle = {
+        "model_version": MODEL_VERSION,
+        "forecast_horizon_hours": 3,
+        "features": list(reversed(FEATURES)),
+        "architecture": {},
+        "operational_state_dict": {},
+        "operational_scaler": {},
+        "evaluation_state_dict": {},
+        "evaluation_scaler": {},
+        "freeze_calibrator": {},
+        "metrics": {},
+    }
 
-    assert labels.shape == (5,)
-    assert scores.shape == (5,)
-    assert 0 <= threshold <= 1
-    assert np.all((scores >= 0) & (scores <= 1))
-    assert scores[3] > scores[0]
-
-
-def test_soften_probabilities_reduces_extreme_values():
-    softened = soften_probabilities(np.array([0.01, 0.5, 0.99]))
-
-    assert softened[0] > 0.01
-    assert softened[1] == pytest.approx(0.5)
-    assert softened[2] < 0.99
-
-
-def test_build_physical_icing_baseline_is_continuous_probability():
-    baseline = build_physical_icing_baseline(_roads_frame())
-
-    assert baseline.shape == (5,)
-    assert np.all((baseline >= 0.05) & (baseline <= 0.95))
-    assert len(np.unique(np.round(baseline, 3))) > 2
-
-
-def test_classification_metrics_handles_single_class_without_auc():
-    metrics = classification_metrics(
-        np.array([1, 1, 1], dtype=np.float32),
-        np.array([0.6, 0.7, 0.9], dtype=np.float32),
-    )
-
-    assert metrics["accuracy"] == 1.0
-    assert "roc_auc" not in metrics
-
-
-def test_get_trainer_device_config_returns_lightning_values():
-    config = get_trainer_device_config()
-
-    assert config.accelerator in {"cpu", "gpu"}
-    assert config.devices == 1
-    assert config.description
-
-
-def test_refresh_shadow_index_keeps_existing_values_when_raw_buildings_missing():
-    roads = _roads_frame()
-
-    class PipelineStub:
-        @staticmethod
-        def load_buildings_and_shadow(_roads):
-            raise FileNotFoundError("missing building shp")
-
-    updated, source = refresh_shadow_index_if_possible(roads, PipelineStub)
-
-    assert updated is roads
-    assert source == "existing_shadow_index_raw_buildings_missing"
-
-
-def test_resolve_roads_geojson_path_prefers_current_outputs(tmp_path):
-    current = tmp_path / "outputs" / "data"
-    legacy = tmp_path / "src" / "outputs" / "data"
-    current.mkdir(parents=True)
-    legacy.mkdir(parents=True)
-    current_file = current / "gangnam_roads_result.geojson"
-    legacy_file = legacy / "gangnam_roads_result.geojson"
-    current_file.write_text("{}", encoding="utf-8")
-    legacy_file.write_text("{}", encoding="utf-8")
-
-    class PipelineStub:
-        BASE_DIR = str(tmp_path)
-        OUTPUT_DATA_DIR = str(current)
-
-    assert resolve_roads_geojson_path(PipelineStub) == current_file
-
-
-def test_resolve_roads_geojson_path_uses_legacy_outputs(tmp_path):
-    current = tmp_path / "outputs" / "data"
-    legacy = tmp_path / "src" / "outputs" / "data"
-    legacy.mkdir(parents=True)
-    legacy_file = legacy / "gangnam_roads_result.geojson"
-    legacy_file.write_text("{}", encoding="utf-8")
-
-    class PipelineStub:
-        BASE_DIR = str(tmp_path)
-        OUTPUT_DATA_DIR = str(current)
-
-    assert resolve_roads_geojson_path(PipelineStub) == legacy_file
+    with pytest.raises(ValueError, match="피처 순서"):
+        validate_model_bundle(bundle)

@@ -1,4 +1,4 @@
-"""로컬 MLP 학습 파이프라인 실행 스크립트."""
+"""실제 기상청 노면온도 MLP 학습과 지도 생성 실행 스크립트."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import scripts.main_pipeline as pipeline  # noqa: E402
 
 
 def main() -> dict[str, object]:
-    """결빙/사고확률 MLP 학습과 지도 산출물 생성을 실행한다."""
+    """3시간 후 노면온도 MLP 학습과 상대 제설 위험도 산출을 실행한다."""
     return train_mlp_pipeline(pipeline)
 
 

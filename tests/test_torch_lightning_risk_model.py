@@ -2,37 +2,40 @@ import pytest
 
 
 torch = pytest.importorskip("torch")
-pl = pytest.importorskip("pytorch_lightning")
+pytest.importorskip("pytorch_lightning")
 
-from src.torch_lightning_risk_model import AccidentRiskLightningModule, IcingRiskLightningModule
-
-
-def test_lightning_module_forward_shape():
-    module = IcingRiskLightningModule(input_dim=8)
-    x = torch.randn(4, 8)
-    y = module(x)
-    assert y.shape == (4,)
-    assert torch.all((y >= 0) & (y <= 1))
+from src.torch_lightning_risk_model import (  # noqa: E402
+    GroundTemperatureLightningModule,
+    GroundTemperatureNet,
+)
 
 
-def test_lightning_module_predict_labels_shape():
-    module = IcingRiskLightningModule(input_dim=8, hidden_dims=(16, 8), dropout=0.0, threshold=0.4)
-    x = torch.randn(4, 8)
-    labels = module.predict_labels(x)
-    assert labels.shape == (4,)
-    assert torch.all((labels == 0) | (labels == 1))
+def test_ground_temperature_net_forward_shape():
+    model = GroundTemperatureNet(input_dim=17, hidden_dims=(16, 8), dropout=0.0)
+    output = model(torch.randn(5, 17))
+
+    assert output.shape == (5,)
 
 
-def test_lightning_module_rejects_wrong_feature_count():
-    module = IcingRiskLightningModule(input_dim=8)
-    x = torch.randn(4, 7)
-    with pytest.raises(ValueError, match="expected 8 features"):
-        module(x)
+def test_ground_temperature_lightning_module_returns_one_value_per_row():
+    module = GroundTemperatureLightningModule(input_dim=17, hidden_dims=(16, 8), dropout=0.0)
+    output = module(torch.randn(5, 17))
+
+    assert output.shape == (5,)
 
 
-def test_accident_risk_module_uses_same_mlp_interface():
-    module = AccidentRiskLightningModule(input_dim=6, hidden_dims=(12,), dropout=0.0)
-    x = torch.randn(3, 6)
-    y = module(x)
-    assert y.shape == (3,)
-    assert torch.all((y >= 0) & (y <= 1))
+def test_ground_temperature_module_rejects_wrong_feature_count():
+    module = GroundTemperatureLightningModule(input_dim=17)
+
+    with pytest.raises(ValueError, match="expected features"):
+        module(torch.randn(2, 16))
+
+
+def test_ground_temperature_training_step_returns_finite_loss():
+    module = GroundTemperatureLightningModule(input_dim=17, hidden_dims=(16,), dropout=0.0)
+    features = torch.randn(8, 17)
+    target = torch.randn(8)
+
+    loss = module.training_step((features, target), 0)
+
+    assert torch.isfinite(loss)

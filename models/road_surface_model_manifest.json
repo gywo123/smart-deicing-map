@@ -1,0 +1,53 @@
+{
+  "model_version": "road_surface_temperature_residual_mlp_v2",
+  "artifact": "road_surface_temperature_mlp.pt",
+  "sha256": "675b6a519d8b7e791bf0854bb45e9e09e83c21945553ec62309914a93c7eeee3",
+  "bytes": 244930,
+  "forecast_horizon_hours": 3,
+  "features": [
+    "temp",
+    "ground_temp_now",
+    "ground_temp_lag_1h",
+    "temp_6h_mean",
+    "humidity",
+    "dewpoint_depression",
+    "wind",
+    "precip_6h",
+    "snow",
+    "new_snow_6h",
+    "solar",
+    "solar_3h_sum",
+    "sunshine",
+    "hour_sin",
+    "hour_cos",
+    "day_sin",
+    "day_cos",
+    "road_surface_temp_now",
+    "road_surface_temp_lag_1h",
+    "road_surface_temp_lag_2h",
+    "road_surface_temp_lag_3h",
+    "road_surface_temp_lag_6h",
+    "road_surface_temp_mean_3h",
+    "road_surface_temp_mean_6h",
+    "road_surface_temp_change_1h",
+    "road_surface_temp_change_3h"
+  ],
+  "architecture": {
+    "hidden_dims": [
+      128,
+      128,
+      64
+    ],
+    "dropout": 0.08,
+    "residual_base": "road_surface_temp_now"
+  },
+  "target": "KMA observed road-surface temperature at +3h",
+  "pseudo_label_used": false,
+  "calibration_period": "2025-11",
+  "test_period": "2025-12",
+  "test_rows": 724,
+  "rmse_c": 1.0637802416283124,
+  "r2": 0.9456853214078392,
+  "freeze_pr_auc": 0.9759734727602455,
+  "claim_scope": "one nearby KMA road station; not road-by-road icing accuracy"
+}

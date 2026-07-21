@@ -238,7 +238,11 @@ def clean_buildings(report: list[dict[str, Any]]) -> gpd.GeoDataFrame:
 
 def clean_weather(report: list[dict[str, Any]]) -> pd.DataFrame:
     weather_dir = RAW_DIR / "weather"
-    main_cols = ["일시", "기온(°C)", "강수량(mm)", "풍속(m/s)", "습도(%)", "적설(cm)", "지면온도(°C)"]
+    main_cols = [
+        "지점", "지점명", "일시", "기온(°C)", "강수량(mm)", "풍속(m/s)", "습도(%)",
+        "이슬점온도(°C)", "일조(hr)", "일사(MJ/m2)", "적설(cm)",
+        "3시간신적설(cm)", "지면온도(°C)",
+    ]
     frames = []
     skipped = []
     for path in sorted(weather_dir.glob("OBS_ASOS_TIM_*.csv")):
@@ -261,25 +265,63 @@ def clean_weather(report: list[dict[str, Any]]) -> pd.DataFrame:
     duplicate_count = int(weather["일시"].duplicated().sum())
     weather = weather.drop_duplicates("일시", keep="last")
 
-    for col in ["강수량(mm)", "적설(cm)"]:
+    for col in ["강수량(mm)", "적설(cm)", "3시간신적설(cm)", "일조(hr)", "일사(MJ/m2)"]:
         if col in weather.columns:
             weather[col] = pd.to_numeric(weather[col], errors="coerce").fillna(0)
-    for col in ["기온(°C)", "습도(%)", "풍속(m/s)", "지면온도(°C)"]:
+    for col in ["기온(°C)", "습도(%)", "풍속(m/s)", "이슬점온도(°C)"]:
         if col in weather.columns:
-            weather[col] = pd.to_numeric(weather[col], errors="coerce").ffill().bfill()
+            weather[col] = pd.to_numeric(weather[col], errors="coerce")
+    weather["지면온도(°C)"] = pd.to_numeric(weather["지면온도(°C)"], errors="coerce")
 
     weather["month"] = weather["일시"].dt.month
     winter = weather[weather["month"].isin([11, 12, 1, 2])].copy()
+    winter = winter.sort_values("일시").reset_index(drop=True)
+    winter["_weather_segment"] = (
+        winter["일시"].diff().gt(pd.Timedelta(hours=2)).fillna(False).cumsum()
+    )
+    imputation_stats: dict[str, int] = {}
+    for col in ["기온(°C)", "습도(%)", "풍속(m/s)", "이슬점온도(°C)"]:
+        missing_before = int(winter[col].isna().sum())
+        # 발행 시각 이후의 관측값이 과거 피처로 들어가지 않도록 과거값만 사용한다.
+        winter[col] = winter.groupby("_weather_segment")[col].transform(
+            lambda values: values.ffill(limit=6)
+        )
+        imputation_stats[col] = missing_before - int(winter[col].isna().sum())
     winter = winter.rename(
         columns={
             "기온(°C)": "temp",
             "강수량(mm)": "precip",
             "풍속(m/s)": "wind",
             "습도(%)": "humidity",
+            "이슬점온도(°C)": "dewpoint",
+            "일조(hr)": "sunshine",
+            "일사(MJ/m2)": "solar",
             "적설(cm)": "snow",
+            "3시간신적설(cm)": "new_snow",
             "지면온도(°C)": "ground_temp",
         }
     )
+    for source, output, window, aggregation in [
+        ("precip", "precip_6h", "6h", "sum"),
+        ("new_snow", "new_snow_6h", "6h", "sum"),
+        ("temp", "temp_6h_mean", "6h", "mean"),
+        ("solar", "solar_3h_sum", "3h", "sum"),
+    ]:
+        values = pd.Series(index=winter.index, dtype=float)
+        for _, group in winter.groupby("_weather_segment"):
+            series = pd.Series(group[source].to_numpy(dtype=float), index=pd.DatetimeIndex(group["일시"]))
+            rolled = getattr(series.rolling(window, min_periods=1), aggregation)()
+            values.loc[group.index] = rolled.to_numpy()
+        winter[output] = values
+    winter["ground_temp_lag_1h"] = winter.groupby("_weather_segment")["ground_temp"].shift(1)
+    winter["dewpoint_depression"] = (winter["temp"] - winter["dewpoint"]).clip(lower=0)
+    hour = winter["일시"].dt.hour
+    day = winter["일시"].dt.dayofyear
+    winter["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+    winter["hour_cos"] = np.cos(2 * np.pi * hour / 24)
+    winter["day_sin"] = np.sin(2 * np.pi * day / 365.25)
+    winter["day_cos"] = np.cos(2 * np.pi * day / 365.25)
+    winter = winter.drop(columns=["_weather_segment"])
     safe_to_csv(winter, OUTPUT_DIR / "weather_winter_clean.csv", report, "weather")
 
     if skipped:
@@ -288,6 +330,26 @@ def clean_weather(report: list[dict[str, Any]]) -> pd.DataFrame:
         report.append(issue("warning", "weather", "일시 파싱 실패 행 제거", null_time))
     if duplicate_count:
         report.append(issue("warning", "weather", "중복 일시 행 제거", duplicate_count))
+    for col, count in imputation_stats.items():
+        if count:
+            report.append(issue("info", "weather", f"{col} 결측을 최대 6시간 과거값으로 보완", count))
+    remaining_feature_nulls = int(
+        winter[["temp", "humidity", "wind", "dewpoint", "ground_temp"]].isna().any(axis=1).sum()
+    )
+    if remaining_feature_nulls:
+        report.append(
+            issue(
+                "warning",
+                "weather",
+                "인과적 보완 후에도 핵심 기상 피처가 비어 학습 시 제외되는 행",
+                remaining_feature_nulls,
+            )
+        )
+    if {"지점", "지점명"}.issubset(winter.columns):
+        station_rows = winter[["지점", "지점명"]].dropna().drop_duplicates()
+        stations = [f"{int(station)} {name}" for station, name in station_rows.itertuples(index=False)]
+        if stations:
+            report.append(issue("info", "weather", "사용 ASOS 관측소: " + ", ".join(stations)))
     report.append(issue("info", "weather", f"겨울철 기상 {len(winter):,}행 정제"))
     return winter
 

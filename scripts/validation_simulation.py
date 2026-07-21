@@ -1,4 +1,4 @@
-"""예측 위험도와 시점별 관측 상황을 비교하는 검증 시뮬레이션."""
+"""실제 결빙사고 다발지역을 이용한 독립 공간 proxy 검증."""
 
 from __future__ import annotations
 
@@ -15,31 +15,25 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager
 import numpy as np
 import pandas as pd
-from sklearn.metrics import average_precision_score, precision_recall_fscore_support, roc_auc_score
+from shapely.geometry import Point, shape
+from shapely.ops import unary_union
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-DATA_DIR = PROJECT_DIR / "data" / "raw"
-OUTPUTS_DIR = PROJECT_DIR / "outputs"
-OUTPUT_DATA_DIR = OUTPUTS_DIR / "data"
-CLEANED_DATA_DIR = OUTPUT_DATA_DIR / "cleaned"
-REPORTS_DIR = OUTPUTS_DIR / "reports"
-FIGURES_DIR = OUTPUTS_DIR / "figures"
-MAPS_DIR = OUTPUTS_DIR / "maps"
+ACCIDENT_PATH = PROJECT_DIR / "data" / "raw" / "weather" / "13_24_freezing.csv"
+OUTPUT_DATA_DIR = PROJECT_DIR / "outputs" / "data"
+REPORTS_DIR = PROJECT_DIR / "outputs" / "reports"
+FIGURES_DIR = PROJECT_DIR / "outputs" / "figures"
+MAPS_DIR = PROJECT_DIR / "outputs" / "maps"
+HABITUAL_ICING_MATCH_PATH = REPORTS_DIR / "habitual_icing_road_matches.csv"
 
 
 def configure_korean_font() -> None:
-    font_candidates = [
-        "C:/Windows/Fonts/malgun.ttf",
-        "C:/Windows/Fonts/NanumGothic.ttf",
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-    ]
-    for font_path in font_candidates:
-        if os.path.exists(font_path):
-            font_manager.fontManager.addfont(font_path)
-            plt.rcParams["font.family"] = font_manager.FontProperties(fname=font_path).get_name()
+    for path in ["C:/Windows/Fonts/malgun.ttf", "C:/Windows/Fonts/NanumGothic.ttf"]:
+        if os.path.exists(path):
+            font_manager.fontManager.addfont(path)
+            plt.rcParams["font.family"] = font_manager.FontProperties(fname=path).get_name()
             break
     plt.rcParams["axes.unicode_minus"] = False
 
@@ -47,338 +41,490 @@ def configure_korean_font() -> None:
 configure_korean_font()
 
 
-def robust_scale(values: pd.Series | np.ndarray) -> np.ndarray:
-    arr = np.asarray(values, dtype=float)
-    low = float(np.nanpercentile(arr, 5))
-    high = float(np.nanpercentile(arr, 95))
-    return np.clip((arr - low) / max(high - low, 1e-9), 0, 1)
-
-
-def load_roads() -> gpd.GeoDataFrame:
-    result_path = OUTPUT_DATA_DIR / "gangnam_roads_result.geojson"
-    clean_path = CLEANED_DATA_DIR / "gangnam_roads_clean.geojson"
-    path = result_path if result_path.exists() else clean_path
-    if not path.exists():
-        raise FileNotFoundError("gangnam_roads_result.geojson 또는 gangnam_roads_clean.geojson이 필요합니다.")
-    roads = gpd.read_file(path).to_crs(epsg=4326)
-    if "risk" not in roads.columns:
-        raise ValueError("검증 시뮬레이션에는 risk 컬럼이 있는 도로 결과 파일이 필요합니다.")
-    if "accident_probability" not in roads.columns:
-        roads["accident_probability"] = roads["risk"]
-    return roads
-
-
-def load_weather() -> pd.DataFrame:
-    path = CLEANED_DATA_DIR / "weather_winter_clean.csv"
-    if not path.exists():
-        raise FileNotFoundError("weather_winter_clean.csv가 필요합니다. scripts/preprocess_data.py를 먼저 실행하세요.")
-    weather = pd.read_csv(path)
-    weather["일시"] = pd.to_datetime(weather["일시"], errors="coerce")
-    weather = weather.dropna(subset=["일시"]).sort_values("일시").reset_index(drop=True)
-    return weather
-
-
 def weather_bucket(row: pd.Series) -> str:
-    snow = float(row.get("snow", 0) or 0)
-    precip = float(row.get("precip", 0) or 0)
-    humidity = float(row.get("humidity", 0) or 0)
-    if snow > 0:
+    """기존 시각화 테스트와 문서 호환을 위한 기상 구분 함수."""
+    if float(row.get("snow", 0) or 0) > 0:
         return "눈"
-    if precip > 0:
+    if float(row.get("precip", 0) or 0) > 0:
         return "비"
-    if humidity >= 80:
+    if float(row.get("humidity", 0) or 0) >= 80:
         return "흐림"
     return "맑음"
 
 
-def load_gangnam_weather_accident_weights() -> dict[str, float]:
-    """강남구 날씨별 사고 통계에서 날씨별 상대 위험 가중치를 만든다."""
-    path = DATA_DIR / "reference" / "accidents" / "교통사고통계_20260510.xlsx"
-    defaults = {"맑음": 1.0, "흐림": 1.25, "비": 1.55, "눈": 2.25, "기타/불명": 1.0}
-    if not path.exists():
-        return defaults
-
-    try:
-        raw = pd.read_excel(path, sheet_name=0, header=None)
-        header = raw.iloc[0].astype(str).tolist()
-        data = raw.iloc[1:].copy()
-        accident_row = data[(data.iloc[:, 0].astype(str) == "서울") & (data.iloc[:, 1].astype(str) == "강남구") & (data.iloc[:, 2].astype(str) == "사고[건]")]
-        if accident_row.empty:
-            return defaults
-        accident_row = accident_row.iloc[0]
-        weather_counts: dict[str, float] = {}
-        for idx, label in enumerate(header):
-            if label in defaults:
-                value = pd.to_numeric(accident_row.iloc[idx], errors="coerce")
-                if pd.notna(value):
-                    weather_counts[label] = weather_counts.get(label, 0.0) + float(value)
-        if not weather_counts:
-            return defaults
-        baseline = max(weather_counts.get("맑음", 1.0), 1.0)
-        return {key: float(np.clip(value / baseline, 0.5, 3.5)) for key, value in weather_counts.items()}
-    except Exception:
-        return defaults
-
-
-def load_time_accident_weights() -> dict[int, float]:
-    """노면상태별 시간대 사고 통계에서 2시간 단위 시간 가중치를 만든다."""
-    path = DATA_DIR / "reference" / "accidents" / "교통사고통계_20260322.xlsx"
-    defaults = {hour: 1.0 for hour in range(24)}
-    if not path.exists():
-        return defaults
-
-    try:
-        raw = pd.read_excel(path, sheet_name=0, header=None)
-        header = raw.iloc[0].astype(str).tolist()
-        data = raw.iloc[1:].copy()
-        accident_row = data[(data.iloc[:, 0].astype(str) == "합계") & (data.iloc[:, 1].astype(str) == "사고[건]")]
-        if accident_row.empty:
-            return defaults
-        accident_row = accident_row.iloc[0]
-        bucket_counts = {}
-        for idx, label in enumerate(header):
-            if "시~" not in label:
-                continue
-            value = pd.to_numeric(accident_row.iloc[idx], errors="coerce")
-            if pd.notna(value):
-                start = int(label.split("시~")[0])
-                bucket_counts[start] = float(value)
-        if not bucket_counts:
-            return defaults
-        mean_count = max(float(np.mean(list(bucket_counts.values()))), 1.0)
-        weights = {}
-        for hour in range(24):
-            bucket = (hour // 2) * 2
-            weights[hour] = float(np.clip(bucket_counts.get(bucket, mean_count) / mean_count, 0.5, 2.5))
-        return weights
-    except Exception:
-        return defaults
-
-
-def sample_weather_slots(weather: pd.DataFrame, max_slots: int = 240) -> pd.DataFrame:
-    if len(weather) <= max_slots:
-        return weather.copy()
-    idx = np.linspace(0, len(weather) - 1, max_slots, dtype=int)
-    return weather.iloc[idx].copy().reset_index(drop=True)
-
-
 def scenario_severity(weather: pd.DataFrame) -> np.ndarray:
+    """지도 설명용 기상 강도이며 모델 성능 검증 정답으로 사용하지 않는다."""
     temp = pd.to_numeric(weather["temp"], errors="coerce").ffill().bfill().to_numpy(dtype=float)
     ground = pd.to_numeric(weather.get("ground_temp", weather["temp"]), errors="coerce").ffill().bfill().to_numpy(dtype=float)
-    humidity = pd.to_numeric(weather.get("humidity", 60), errors="coerce").ffill().bfill().to_numpy(dtype=float)
-    wind = pd.to_numeric(weather.get("wind", 1), errors="coerce").fillna(1).to_numpy(dtype=float)
-    precip = pd.to_numeric(weather.get("precip", 0), errors="coerce").fillna(0).to_numpy(dtype=float)
     snow = pd.to_numeric(weather.get("snow", 0), errors="coerce").fillna(0).to_numpy(dtype=float)
-
-    severity = (
-        0.30 * np.clip((2.0 - temp) / 14.0, 0, 1)
-        + 0.25 * np.clip((1.0 - ground) / 10.0, 0, 1)
-        + 0.18 * np.clip(snow / 5.0, 0, 1)
-        + 0.12 * np.clip(precip / 5.0, 0, 1)
-        + 0.10 * np.clip((humidity - 55.0) / 40.0, 0, 1)
-        + 0.05 * np.clip(wind / 10.0, 0, 1)
+    precip = pd.to_numeric(weather.get("precip", 0), errors="coerce").fillna(0).to_numpy(dtype=float)
+    return np.clip(
+        0.45 * np.clip((2 - ground) / 10, 0, 1)
+        + 0.30 * np.clip((2 - temp) / 14, 0, 1)
+        + 0.15 * np.clip(snow / 5, 0, 1)
+        + 0.10 * np.clip(precip / 5, 0, 1),
+        0,
+        1,
     )
-    return np.clip(severity, 0, 1)
 
 
-def build_validation_events(roads: gpd.GeoDataFrame, weather: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """시점별 도로상황 관측값을 통계 기반으로 생성하고 예측값과 비교한다."""
-    slots = sample_weather_slots(weather)
-    weather_weights = load_gangnam_weather_accident_weights()
-    time_weights = load_time_accident_weights()
-    severity = scenario_severity(slots)
+def load_roads() -> gpd.GeoDataFrame:
+    path = OUTPUT_DATA_DIR / "gangnam_roads_result.geojson"
+    if not path.exists():
+        raise FileNotFoundError("MLP 파이프라인의 gangnam_roads_result.geojson이 필요합니다.")
+    roads = gpd.read_file(path).to_crs(epsg=4326)
+    required = {"LINK_ID", "risk", "geometry"}
+    missing = sorted(required - set(roads.columns))
+    if missing:
+        raise ValueError(f"도로 결과 컬럼 누락: {missing}")
+    return roads
 
-    road_factor = (
-        0.45 * np.asarray(roads["risk"], dtype=float)
-        + 0.25 * np.asarray(roads["accident_probability"], dtype=float)
-        + 0.15 * robust_scale(roads.get("shadow_index", 0))
-        + 0.10 * robust_scale(roads.get("pop_weight", 0))
-        + 0.05 * (1.0 - robust_scale(roads.get("LANES", 2)))
-    )
-    road_factor = np.clip(road_factor, 0, 1)
-    predicted = np.clip(0.58 * np.asarray(roads["risk"], dtype=float) + 0.42 * np.asarray(roads["accident_probability"], dtype=float), 0, 1)
 
-    rows = []
+def load_gangnam_accident_hotspots() -> gpd.GeoDataFrame:
+    """결빙사고 다발지역 원자료에서 강남구 관측만 읽는다."""
+    if not ACCIDENT_PATH.exists():
+        raise FileNotFoundError(f"결빙사고 다발지역 자료가 없습니다: {ACCIDENT_PATH}")
+    accidents = pd.read_csv(ACCIDENT_PATH, encoding="cp949")
+    required = {"사고다발지id", "시도시군구명", "지점명", "사고건수", "사상자수", "경도", "위도"}
+    missing = sorted(required - set(accidents.columns))
+    if missing:
+        raise ValueError(f"결빙사고 자료 컬럼 누락: {missing}")
+    accidents = accidents[
+        accidents["시도시군구명"].astype(str).str.contains("강남구", na=False)
+    ].copy()
+    if accidents.empty:
+        raise ValueError("결빙사고 자료에 강남구 행이 없습니다.")
+    return cluster_hotspot_records(accidents)
+
+
+def cluster_hotspot_records(accidents: pd.DataFrame, distance_m: float = 100.0) -> gpd.GeoDataFrame:
+    """여러 연도에 반복된 동일 사고 다발지역을 하나의 실제 장소로 합친다."""
+    rows: list[dict[str, object]] = []
+    for _, record in accidents.iterrows():
+        lon = pd.to_numeric(record.get("경도"), errors="coerce")
+        lat = pd.to_numeric(record.get("위도"), errors="coerce")
+        if pd.isna(lon) or pd.isna(lat):
+            continue
+        geometry = None
+        raw_polygon = record.get("다발지역폴리곤")
+        if isinstance(raw_polygon, str) and raw_polygon.strip():
+            try:
+                geometry = shape(json.loads(raw_polygon))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                geometry = None
+        if geometry is None or geometry.is_empty:
+            geometry = Point(float(lon), float(lat))
+        hotspot_id = str(record.get("사고다발지id", ""))
+        year = int(hotspot_id[:4]) if hotspot_id[:4].isdigit() else None
+        rows.append(
+            {
+                "location": str(record.get("지점명", "")),
+                "year": year,
+                "accidents": float(pd.to_numeric(record.get("사고건수"), errors="coerce") or 0),
+                "casualties": float(pd.to_numeric(record.get("사상자수"), errors="coerce") or 0),
+                "geometry": geometry,
+            }
+        )
+    points = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326").to_crs(epsg=5186)
+    parents = list(range(len(points)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    geometries = list(points.geometry)
+    centroids = [geometry.centroid for geometry in geometries]
+    for left in range(len(points)):
+        for right in range(left + 1, len(points)):
+            if geometries[left].intersects(geometries[right]) or centroids[left].distance(centroids[right]) <= distance_m:
+                union(left, right)
+
+    groups: dict[int, list[int]] = {}
+    for index in range(len(points)):
+        groups.setdefault(find(index), []).append(index)
+    clusters = []
+    for cluster_id, indices in enumerate(groups.values(), start=1):
+        subset = points.iloc[indices]
+        clusters.append(
+            {
+                "cluster_id": cluster_id,
+                "locations": sorted(set(subset["location"].astype(str))),
+                "years": sorted(int(year) for year in subset["year"].dropna().unique()),
+                "source_records": int(len(subset)),
+                "accidents": float(subset["accidents"].sum()),
+                "casualties": float(subset["casualties"].sum()),
+                "geometry": unary_union(list(subset.geometry)),
+            }
+        )
+    return gpd.GeoDataFrame(clusters, geometry="geometry", crs="EPSG:5186")
+
+
+def hotspot_road_indices(
+    roads_metric: gpd.GeoDataFrame,
+    geometry: object,
+) -> tuple[list[object], float]:
+    """사고 다발지역과 겹치는 모든 도로를 반환하고, 없으면 최단거리 도로를 쓴다."""
+    distances = roads_metric.geometry.distance(geometry)
+    local = distances[distances <= 1.0].index.tolist()
+    if not local:
+        local = [distances.idxmin()]
+    return local, float(distances.loc[local].min())
+
+
+def evaluate_hotspot_risk_ranking(
+    roads_metric: gpd.GeoDataFrame,
+    hotspots: gpd.GeoDataFrame,
+) -> tuple[dict[str, object], pd.DataFrame]:
+    """지역별 최고값 선택 없이 겹치는 도로 전체의 평균 순위를 평가한다."""
+    risk_percentile = roads_metric["risk"].rank(method="average", pct=True)
+    matches = []
+    for _, hotspot in hotspots.iterrows():
+        local_indices, distance_m = hotspot_road_indices(roads_metric, hotspot.geometry)
+        local_risk = roads_metric.loc[local_indices, "risk"].astype(float)
+        local_percentile = risk_percentile.loc[local_indices].astype(float)
+        matches.append(
+            {
+                "cluster_id": int(hotspot["cluster_id"]),
+                "locations": " | ".join(hotspot["locations"]),
+                "years": ",".join(str(year) for year in hotspot["years"]),
+                "source_records": int(hotspot["source_records"]),
+                "accidents": float(hotspot["accidents"]),
+                "casualties": float(hotspot["casualties"]),
+                "local_link_count": int(len(local_indices)),
+                "matched_link_ids": "|".join(
+                    roads_metric.loc[local_indices, "LINK_ID"].astype(str).tolist()
+                ),
+                "distance_m": distance_m,
+                "risk_mean": float(local_risk.mean()),
+                "risk_percentile": float(local_percentile.mean()),
+                "risk_percentile_median": float(local_percentile.median()),
+                "risk_percentile_max_descriptive_only": float(local_percentile.max()),
+            }
+        )
+    table = pd.DataFrame(matches)
+    weights = table["accidents"].to_numpy(dtype=float)
+    observed_weighted = float(np.average(table["risk_percentile"], weights=weights))
     rng = np.random.default_rng(42)
-    for slot_idx, slot in slots.iterrows():
-        bucket = weather_bucket(slot)
-        hour = int(slot["일시"].hour)
-        observed_prob = np.clip(
-            0.07
-            + 0.52 * road_factor
-            + 0.36 * severity[slot_idx] * weather_weights.get(bucket, 1.0)
-            + 0.05 * time_weights.get(hour, 1.0),
-            0,
-            1,
-        )
-        threshold_noise = rng.uniform(0.0, 1.0, size=len(roads))
-        actual_event = observed_prob >= threshold_noise
-        road_condition = np.where(
-            observed_prob >= 0.72,
-            "사고/심각 결빙",
-            np.where(observed_prob >= 0.55, "결빙 의심", np.where(observed_prob >= 0.38, "주의", "정상")),
-        )
-        for road_idx, row in roads.reset_index(drop=True).iterrows():
-            rows.append(
-                {
-                    "timestamp": slot["일시"].isoformat(),
-                    "LINK_ID": str(row["LINK_ID"]),
-                    "predicted_risk": float(predicted[road_idx]),
-                    "observed_probability": float(observed_prob[road_idx]),
-                    "actual_event": bool(actual_event[road_idx]),
-                    "road_condition": str(road_condition[road_idx]),
-                    "weather_bucket": bucket,
-                    "weather_severity": float(severity[slot_idx]),
-                }
+    road_percentiles = risk_percentile.to_numpy(dtype=float)
+    local_counts = table["local_link_count"].to_numpy(dtype=int)
+    random_scores = np.asarray(
+        [
+            np.average(
+                [
+                    rng.choice(road_percentiles, size=count, replace=False).mean()
+                    for count in local_counts
+                ],
+                weights=weights,
             )
-
-    events = pd.DataFrame(rows)
-    grouped = events.groupby("LINK_ID").agg(
-        actual_event_rate=("actual_event", "mean"),
-        observed_probability=("observed_probability", "mean"),
-        samples=("actual_event", "size"),
+            for _ in range(10000)
+        ],
+        dtype=float,
     )
-    road_summary = roads.copy()
-    road_summary["LINK_ID"] = road_summary["LINK_ID"].astype(str)
-    road_summary = road_summary.merge(grouped, left_on="LINK_ID", right_index=True, how="left")
-    road_summary["actual_event_rate"] = road_summary["actual_event_rate"].fillna(0)
-    road_summary["observed_probability"] = road_summary["observed_probability"].fillna(0)
-    road_summary["samples"] = road_summary["samples"].fillna(0).astype(int)
-    road_summary["predicted_validation_score"] = predicted
-    return events, road_summary
-
-
-def validation_metrics(events: pd.DataFrame, threshold: float = 0.5) -> dict[str, float]:
-    y_true = events["actual_event"].astype(int).to_numpy()
-    y_score = events["predicted_risk"].to_numpy(dtype=float)
-    y_pred = (y_score >= threshold).astype(int)
-    precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary", zero_division=0)
     metrics = {
-        "samples": int(len(events)),
-        "actual_event_rate": round(float(y_true.mean()), 4),
-        "threshold": threshold,
-        "precision": round(float(precision), 4),
-        "recall": round(float(recall), 4),
-        "f1": round(float(f1), 4),
-        "average_precision": round(float(average_precision_score(y_true, y_score)), 4),
+        "hotspot_clusters": int(len(table)),
+        "source_records": int(hotspots["source_records"].sum()),
+        "year_range": [
+            int(min(year for years in hotspots["years"] for year in years)),
+            int(max(year for years in hotspots["years"] for year in years)),
+        ],
+        "mean_risk_percentile": float(table["risk_percentile"].mean()),
+        "accident_weighted_mean_risk_percentile": observed_weighted,
+        "top_30pct_hotspot_count": int((table["risk_percentile"] >= 0.70).sum()),
+        "top_30pct_hotspot_rate": float((table["risk_percentile"] >= 0.70).mean()),
+        "matching_rule": "mean percentile of every intersecting road; nearest road only when none intersects",
+        "random_road_weighted_mean": float(random_scores.mean()),
+        "random_road_weighted_p95": float(np.quantile(random_scores, 0.95)),
+        "one_sided_permutation_p_value": float(
+            (1 + np.sum(random_scores >= observed_weighted)) / (len(random_scores) + 1)
+        ),
+        "permutations": 10000,
+        "seed": 42,
     }
-    if len(np.unique(y_true)) > 1:
-        metrics["roc_auc"] = round(float(roc_auc_score(y_true, y_score)), 4)
-    return metrics
+    return metrics, table
 
 
-def save_validation_figure(events: pd.DataFrame, road_summary: gpd.GeoDataFrame) -> None:
-    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
-
-    axes[0].scatter(
-        road_summary["predicted_validation_score"],
-        road_summary["actual_event_rate"],
-        s=10,
-        alpha=0.55,
-        color="#1565c0",
+def evaluate_selected_coverage(
+    roads_metric: gpd.GeoDataFrame,
+    hotspots: gpd.GeoDataFrame,
+) -> dict[str, object]:
+    if "selected" not in roads_metric.columns:
+        return {"available": False, "reason": "selected 컬럼 없음"}
+    selected_mask = roads_metric["selected"].astype(bool)
+    local_indices = [
+        hotspot_road_indices(roads_metric, geometry)[0]
+        for geometry in hotspots.geometry
+    ]
+    local_selected_share = np.asarray(
+        [float(selected_mask.loc[indices].mean()) for indices in local_indices],
+        dtype=float,
     )
-    axes[0].set_xlabel("예측 위험도")
-    axes[0].set_ylabel("시뮬레이션 관측 이벤트율")
-    axes[0].set_title("도로별 예측-관측 비교")
+    hit_arr = local_selected_share > 0
+    accident_weights = hotspots["accidents"].to_numpy(dtype=float)
+    observed = float(np.average(local_selected_share, weights=accident_weights))
 
-    events.boxplot(column="predicted_risk", by="road_condition", ax=axes[1], grid=False, rot=30)
-    axes[1].set_title("도로상황별 예측 위험도")
-    axes[1].set_xlabel("")
-    axes[1].set_ylabel("예측 위험도")
+    rng = np.random.default_rng(42)
+    random_scores = []
+    select_count = min(int(selected_mask.sum()), len(roads_metric))
+    positions = {
+        index: position for position, index in enumerate(roads_metric.index)
+    }
+    local_positions = [
+        np.asarray([positions[index] for index in indices], dtype=int)
+        for indices in local_indices
+    ]
+    for _ in range(10000):
+        sample = rng.choice(len(roads_metric), size=select_count, replace=False)
+        random_selected = np.zeros(len(roads_metric), dtype=bool)
+        random_selected[sample] = True
+        random_local_share = np.asarray(
+            [random_selected[indices].mean() for indices in local_positions],
+            dtype=float,
+        )
+        random_scores.append(float(np.average(random_local_share, weights=accident_weights)))
+    random_arr = np.asarray(random_scores)
+    overall_selected_share = float(selected_mask.mean())
+    return {
+        "available": True,
+        "selected_roads": int(selected_mask.sum()),
+        "overall_selected_road_share": overall_selected_share,
+        "hotspot_hit_count": int(hit_arr.sum()),
+        "hotspot_hit_rate": float(hit_arr.mean()),
+        "accident_weighted_local_selected_share": observed,
+        "selection_lift_vs_citywide": float(observed / max(overall_selected_share, 1e-9)),
+        "random_same_count_mean": float(random_arr.mean()),
+        "random_same_count_p95": float(np.quantile(random_arr, 0.95)),
+        "one_sided_permutation_p_value": float(
+            (1 + np.sum(random_arr >= observed)) / (len(random_arr) + 1)
+        ),
+        "permutations": 10000,
+        "seed": 42,
+        "matching_rule": "accident-weighted share of selected roads within each hotspot",
+    }
 
-    top = road_summary.sort_values("actual_event_rate", ascending=False).head(15)
-    axes[2].barh(top["LINK_ID"].astype(str), top["actual_event_rate"], color="#d32f2f")
-    axes[2].invert_yaxis()
-    axes[2].set_title("관측 이벤트율 상위 LINK")
-    axes[2].set_xlabel("이벤트율")
 
-    fig.suptitle("")
+def evaluate_habitual_icing_ranking(
+    roads_metric: gpd.GeoDataFrame,
+    source_matches: pd.DataFrame,
+) -> tuple[dict[str, object], pd.DataFrame]:
+    """행정안전부 상습결빙구간에 연결된 모든 링크의 평균 위험 순위를 평가한다."""
+    risk_percentile = roads_metric["risk"].rank(method="average", pct=True)
+    link_to_index = {
+        str(link_id): index
+        for index, link_id in roads_metric["LINK_ID"].items()
+    }
+    rows: list[dict[str, object]] = []
+    for record in source_matches.itertuples(index=False):
+        requested = str(record.matched_link_ids).split("|")
+        indices = [link_to_index[link_id] for link_id in requested if link_id in link_to_index]
+        if not indices:
+            continue
+        local_percentiles = risk_percentile.loc[indices].astype(float)
+        rows.append(
+            {
+                "segment_id": str(record.segment_id),
+                "road_name": str(record.road_name),
+                "source_length_km": float(record.source_length_km),
+                "matched_link_count": int(len(indices)),
+                "risk_percentile": float(local_percentiles.mean()),
+                "risk_percentile_median": float(local_percentiles.median()),
+                "risk_percentile_max_descriptive_only": float(local_percentiles.max()),
+            }
+        )
+    table = pd.DataFrame(rows)
+    if table.empty:
+        return {"available": False, "reason": "매칭된 상습결빙 링크 없음"}, table
+
+    weights = table["source_length_km"].clip(lower=0.01).to_numpy(dtype=float)
+    observed = float(table["risk_percentile"].mean())
+    observed_weighted = float(np.average(table["risk_percentile"], weights=weights))
+    counts = table["matched_link_count"].to_numpy(dtype=int)
+    road_percentiles = risk_percentile.to_numpy(dtype=float)
+    rng = np.random.default_rng(42)
+    random_means: list[float] = []
+    random_weighted: list[float] = []
+    for _ in range(10000):
+        local_scores = np.asarray(
+            [
+                rng.choice(road_percentiles, size=count, replace=False).mean()
+                for count in counts
+            ],
+            dtype=float,
+        )
+        random_means.append(float(local_scores.mean()))
+        random_weighted.append(float(np.average(local_scores, weights=weights)))
+    random_values = np.asarray(random_means)
+    random_weighted_values = np.asarray(random_weighted)
+    return {
+        "available": True,
+        "source_segments": int(len(table)),
+        "matched_road_links": int(counts.sum()),
+        "mean_risk_percentile": observed,
+        "length_weighted_mean_risk_percentile": observed_weighted,
+        "top_30pct_segment_count": int((table["risk_percentile"] >= 0.70).sum()),
+        "top_30pct_segment_rate": float((table["risk_percentile"] >= 0.70).mean()),
+        "random_mean": float(random_values.mean()),
+        "random_p95": float(np.quantile(random_values, 0.95)),
+        "one_sided_permutation_p_value": float(
+            (1 + np.sum(random_values >= observed)) / (len(random_values) + 1)
+        ),
+        "length_weighted_random_mean": float(random_weighted_values.mean()),
+        "length_weighted_one_sided_p_value": float(
+            (1 + np.sum(random_weighted_values >= observed_weighted))
+            / (len(random_weighted_values) + 1)
+        ),
+        "permutations": 10000,
+        "seed": 42,
+        "matching_rule": "mean percentile of every road link matched within 20m",
+    }, table
+
+
+def save_figure(matches: pd.DataFrame, ranking: dict[str, object], coverage: dict[str, object]) -> None:
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    axes[0].bar(matches["cluster_id"].astype(str), matches["risk_percentile"], color="#1565c0")
+    axes[0].axhline(0.70, color="#ef6c00", linestyle="--", label="상위 30% 기준")
+    axes[0].set_ylim(0, 1)
+    axes[0].set_xlabel("사고 다발지역 군집")
+    axes[0].set_ylabel("매칭 도로 위험도 백분위")
+    axes[0].set_title("실제 결빙사고 다발지역의 위험 순위")
+    axes[0].legend()
+
+    axes[1].scatter(matches["accidents"], matches["risk_percentile"], s=80, color="#2e7d32")
+    for row in matches.itertuples(index=False):
+        axes[1].annotate(str(row.cluster_id), (row.accidents, row.risk_percentile))
+    axes[1].set_ylim(0, 1)
+    axes[1].set_xlabel("누적 사고건수")
+    axes[1].set_ylabel("위험도 백분위")
+    axes[1].set_title("사고건수와 독립 위험 순위")
+
+    if coverage.get("available"):
+        labels = ["제안 경로", "동일 도로 수\n무작위 평균", "무작위 95%"]
+        values = [
+            coverage["accident_weighted_local_selected_share"],
+            coverage["random_same_count_mean"],
+            coverage["random_same_count_p95"],
+        ]
+        axes[2].bar(labels, values, color=["#d32f2f", "#90a4ae", "#546e7a"])
+        axes[2].set_ylim(0, 1)
+        axes[2].set_title(f"사고건수 가중 포함률 (p={coverage['one_sided_permutation_p_value']:.3f})")
+    else:
+        axes[2].text(0.5, 0.5, "선정 도로 검증 불가", ha="center", va="center")
+        axes[2].set_axis_off()
+    plt.suptitle("독립 공간 proxy 검증 - 도로 결빙 정확도가 아님", fontsize=14)
     plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "validation_simulation.png", dpi=150)
+    plt.savefig(FIGURES_DIR / "validation_simulation.png", dpi=160)
     plt.close()
 
 
-def save_validation_map(road_summary: gpd.GeoDataFrame) -> None:
+def save_map(roads: gpd.GeoDataFrame, hotspots: gpd.GeoDataFrame) -> None:
     MAPS_DIR.mkdir(parents=True, exist_ok=True)
-    centroids = road_summary.to_crs(epsg=5186).geometry.centroid.to_crs(epsg=4326)
-    center = [float(centroids.y.mean()), float(centroids.x.mean())]
-    m = folium.Map(location=center, zoom_start=13, tiles="cartodbpositron")
-
-    q75 = float(road_summary["actual_event_rate"].quantile(0.75))
-    q50 = float(road_summary["actual_event_rate"].quantile(0.50))
-
-    def color(row: pd.Series) -> str:
-        predicted_high = float(row["predicted_validation_score"]) >= 0.5
-        actual_high = float(row["actual_event_rate"]) >= q75
-        if predicted_high and actual_high:
-            return "#2e7d32"  # TP
-        if predicted_high and not actual_high:
-            return "#f9a825"  # FP
-        if (not predicted_high) and actual_high:
-            return "#d32f2f"  # FN
-        if float(row["actual_event_rate"]) >= q50:
-            return "#1565c0"
-        return "#90a4ae"
-
-    for _, row in road_summary.to_crs(epsg=4326).iterrows():
-        coords = [(lat, lon) for lon, lat in row.geometry.coords]
-        tooltip = (
-            f"LINK {row['LINK_ID']}<br>"
-            f"예측위험도 {row['predicted_validation_score']:.3f}<br>"
-            f"관측 이벤트율 {row['actual_event_rate']:.3f}<br>"
-            f"관측확률 {row['observed_probability']:.3f}<br>"
-            f"샘플 {int(row['samples'])}개"
-        )
-        folium.PolyLine(coords, color=color(row), weight=4, opacity=0.82, tooltip=tooltip).add_to(m)
-
-    legend = """
-    <div style="position: fixed; bottom: 24px; left: 24px; z-index: 9999; background: white; padding: 12px; border: 1px solid #bbb; font-size: 13px;">
-      <b>예측 vs 관측 검증</b><br>
-      <span style="color:#2e7d32;">■</span> 예측 높음 + 관측 높음<br>
-      <span style="color:#f9a825;">■</span> 예측 높음 + 관측 낮음<br>
-      <span style="color:#d32f2f;">■</span> 예측 낮음 + 관측 높음<br>
-      <span style="color:#1565c0;">■</span> 중간 관측<br>
-      <span style="color:#90a4ae;">■</span> 낮은 관측
-    </div>
-    """
-    m.get_root().html.add_child(folium.Element(legend))
-    m.save(MAPS_DIR / "map_validation_simulation.html")
+    min_lon, min_lat, max_lon, max_lat = roads.total_bounds
+    center = [float((min_lat + max_lat) / 2), float((min_lon + max_lon) / 2)]
+    map_obj = folium.Map(location=center, zoom_start=13, tiles="CartoDB positron")
+    for _, road in roads.iterrows():
+        score = float(road["risk"])
+        color = "#d32f2f" if score >= roads["risk"].quantile(0.7) else "#90a4ae"
+        folium.GeoJson(
+            road.geometry.__geo_interface__,
+            style_function=lambda _, c=color: {"color": c, "weight": 2, "opacity": 0.75},
+            tooltip=f"LINK {road['LINK_ID']} | 상대 위험지수 {score:.3f}",
+        ).add_to(map_obj)
+    for _, hotspot in hotspots.to_crs(epsg=4326).iterrows():
+        point = hotspot.geometry.centroid
+        folium.Marker(
+            [point.y, point.x],
+            tooltip=f"실제 결빙사고 다발지역 군집 {hotspot['cluster_id']}",
+            popup=(
+                f"관측 연도: {hotspot['years']}<br>"
+                f"원자료: {hotspot['source_records']}건<br>"
+                f"사고: {hotspot['accidents']:.0f}건, 사상자: {hotspot['casualties']:.0f}명"
+            ),
+            icon=folium.Icon(color="orange", icon="info-sign"),
+        ).add_to(map_obj)
+    map_obj.save(MAPS_DIR / "map_validation_simulation.html")
 
 
 def main() -> dict[str, object]:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     roads = load_roads()
-    weather = load_weather()
-    events, road_summary = build_validation_events(roads, weather)
-    metrics = validation_metrics(events)
+    roads_metric = roads.to_crs(epsg=5186)
+    hotspots = load_gangnam_accident_hotspots()
+    ranking, matches = evaluate_hotspot_risk_ranking(roads_metric, hotspots)
+    coverage = evaluate_selected_coverage(roads_metric, hotspots)
+    if HABITUAL_ICING_MATCH_PATH.exists():
+        habitual_source = pd.read_csv(HABITUAL_ICING_MATCH_PATH)
+        habitual_ranking, habitual_table = evaluate_habitual_icing_ranking(
+            roads_metric, habitual_source
+        )
+        habitual_table.to_csv(
+            REPORTS_DIR / "habitual_icing_validation.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+    else:
+        habitual_ranking = {
+            "available": False,
+            "reason": "python scripts/collect_public_data.py를 먼저 실행하세요.",
+        }
 
-    events_path = REPORTS_DIR / "validation_events_sample.csv"
-    events.head(5000).to_csv(events_path, index=False, encoding="utf-8-sig")
-    road_summary.drop(columns="geometry").to_csv(REPORTS_DIR / "validation_road_summary.csv", index=False, encoding="utf-8-sig")
-    save_validation_figure(events, road_summary)
-    save_validation_map(road_summary)
+    matches.to_csv(REPORTS_DIR / "validation_hotspot_matches.csv", index=False, encoding="utf-8-sig")
+    road_summary = roads.drop(columns="geometry").copy()
+    road_summary.to_csv(REPORTS_DIR / "validation_road_summary.csv", index=False, encoding="utf-8-sig")
+    save_figure(matches, ranking, coverage)
+    save_map(roads, hotspots)
 
     payload = {
-        "mode": "statistical_validation_simulation",
-        "description": "지점별 실제 사고 라벨이 없어서 강남구 날씨별 사고 통계와 노면상태 시간대 통계를 이용해 시점별 도로상황 관측값을 생성하고 예측 위험도와 비교한다.",
-        "data_sources": [
-            "outputs/data/gangnam_roads_result.geojson",
-            "outputs/data/cleaned/weather_winter_clean.csv",
-            "data/raw/reference/accidents/교통사고통계_20260510.xlsx",
-            "data/raw/reference/accidents/교통사고통계_20260322.xlsx",
-        ],
-        "metrics": metrics,
-        "outputs": {
-            "events_sample": str(events_path),
-            "road_summary": str(REPORTS_DIR / "validation_road_summary.csv"),
-            "figure": str(FIGURES_DIR / "validation_simulation.png"),
-            "map": str(MAPS_DIR / "map_validation_simulation.html"),
+        "schema_version": 2,
+        "mode": "independent_spatial_proxy_validation",
+        "source": ACCIDENT_PATH.relative_to(PROJECT_DIR).as_posix(),
+        "used_for_training_or_tuning": False,
+        "actual_road_icing_labels_available": False,
+        "ranking_agreement": ranking,
+        "habitual_icing_segment_validation": habitual_ranking,
+        "selected_road_coverage": coverage,
+        "independent_findings": {
+            "accident_hotspots": (
+                "상대 위험 순위가 무작위보다 높아 양의 공간 일치도가 확인됨"
+            ),
+            "official_habitual_icing_segments": (
+                "상대 위험 순위가 무작위보다 높지 않아 공간 일반화가 확인되지 않음"
+            ),
+            "selected_routes": (
+                "사고 다발지역 내부 선택률이 무작위 동일 규모 선택보다 높지 않음"
+            ),
         },
-        "note": "실제 좌표/시각 단위 사고 또는 도로결빙 관측 데이터가 확보되면 actual_event 컬럼을 해당 데이터로 교체하면 된다.",
+        "allowed_claim": (
+            "두 독립 공간자료와 비교했으며, 사고 다발지역에서는 양의 일치도가 "
+            "나왔지만 공식 상습결빙구간에서는 일반화되지 않았다."
+        ),
+        "prohibited_claims": [
+            "도로 결빙 정확도",
+            "사고 발생 확률 정확도",
+            "사고 감소율 실증",
+        ],
+        "note": (
+            "사고 다발지역은 개별 시각의 도로 결빙 정답이 아니다. "
+            "지역 안의 최고 위험 도로를 고르지 않고 겹치는 모든 도로의 평균을 사용했다. "
+            "공식 상습결빙구간도 학습이나 계수 조정에 사용하지 않았다. "
+            "따라서 본 결과는 독립 공간 proxy 검증이며 모델의 분류 성능으로 해석하지 않는다."
+        ),
+        "outputs": {
+            "matches": (REPORTS_DIR / "validation_hotspot_matches.csv").relative_to(PROJECT_DIR).as_posix(),
+            "figure": (FIGURES_DIR / "validation_simulation.png").relative_to(PROJECT_DIR).as_posix(),
+            "map": (MAPS_DIR / "map_validation_simulation.html").relative_to(PROJECT_DIR).as_posix(),
+        },
     }
-    (REPORTS_DIR / "validation_simulation.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    (REPORTS_DIR / "validation_simulation.json").write_text(text, encoding="utf-8")
+    (REPORTS_DIR / "spatial_proxy_validation.json").write_text(text, encoding="utf-8")
+    print(text)
     return payload
 
 

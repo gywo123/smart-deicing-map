@@ -1,82 +1,84 @@
-# 스마트 제설 지도 실행 방법 및 프로젝트 정리
+# ICE-ZERO
 
-## 1. 프로젝트 개요
+강남구 겨울철 도로의 상대적 결빙 위험 순위를 산정하고, 제한된 예산과 제설차 작업시간 안에서 처리 도로와 이동 경로를 생성하는 프로젝트다.
 
-이 프로젝트는 강남구 도로 데이터를 기준으로 결빙 위험도를 계산하고, 우선 제설 대상 도로를 선택한 뒤, 제설차별 도포 경로를 지도 HTML로 생성하는 파이프라인이다.
+## 현재 모델
 
-현재 모델/알고리즘 흐름은 다음과 같다.
+- 모델: PyTorch Lightning residual MLP
+- 모델 버전: `road_surface_temperature_residual_mlp_v2`
+- 예측 목표: 발행 시각 기준 3시간 후 실측 노면온도
+- 실제 정답: 기상청 도로기상관측 원지(도) `노면온도(°C)`
+- pseudo-label: 사용하지 않음
+- 개발/튜닝/테스트: 2024-11~2025-02 / 2025-11 / 2025-12 시간 분리
+- 도로 위험도: MLP 예측 노면온도 + 강수·적설·응결 수분 + 건물 그림자
+- XGBoost, MCMF: 사용하지 않음
 
-```text
-원본 데이터 정제
--> 건물 그림자/기상/유동인구/도로 특성 계산
--> MLP 기반 결빙 위험도 및 사고 위험도 추정
--> Knapsack + Budgeted Maximum Coverage로 제설 대상 선택
--> VRP 휴리스틱으로 제설차별 경로 생성
--> 지도/리포트 출력
-```
+MLP는 도로 사고확률을 직접 예측하지 않는다. 강남 중심에서 약 5.25km 떨어진 경부선 원지(도) 관측소의 실제 노면온도를 예측한 뒤 물리 조건을 결합해 도로 간 상대 제설 우선순위를 만든다. 기존 ASOS 지면온도 모델은 비교용 소스 코드와 평가 기록만 남기며 구형 모델 바이너리는 배포하지 않는다.
 
-현재 기준:
+## 독립 평가 결과
 
-- 메인 모델: PyTorch Lightning 기반 MLP
-- 도로 연결: `F_NODE -> T_NODE` 기준 방향 그래프
-- 노드 보정: `MOCT_NODE` 좌표 기준으로 링크 시작/종료점 보정
-- 그림자 시간대: `0시~23시` 전체 시간대 기준
-- 제설차 수: 작업량에 따라 자동 산정
+2025년 12월은 모델 학습, 조기종료 선택, 동결확률 보정에 사용하지 않은 시간 홀드아웃이다.
 
-## 2. 폴더 구조
+| 평가 항목 | 결과 |
+|---|---:|
+| 테스트 표본 | 724시간 |
+| 3시간 후 노면온도 RMSE | 1.064°C |
+| RMSE 95% bootstrap 구간 | 0.999~1.129°C |
+| MAE | 0.804°C |
+| R² | 0.946 |
+| 현재 노면온도 지속 기준 대비 RMSE skill | 61.2% |
+| 0°C 이하 Precision / Recall / F1 | 0.958 / 0.806 / 0.875 |
+| 0°C 이하 사건 PR-AUC | 0.976 |
+| ROC-AUC | 0.991 |
+| Brier score | 0.0433 |
+| 현재 노면온도 지속 기준 RMSE | 2.744°C |
+| 발행 시각 기온 기준 RMSE | 3.161°C |
 
-```text
-smart-deicing-map-codex-71uq2a/
-├─ data/                 원본 데이터
-├─ models/               학습된 모델 파일
-├─ outputs/              지도, 리포트, 정제 데이터 출력
-├─ config/               제설 비용/살포량 설정
-├─ scripts/              실행 스크립트
-├─ src/                  모델/점수/계획 모듈
-├─ tests/                테스트 코드
-└─ 모델 기획서.md
-```
+이 수치는 **원지(도) 단일 관측소의 실측 노면온도와 0°C 이하 사건 예측 성능**이다. 강남 전체 도로별 결빙 정확도나 사고 발생 확률로 해석하면 안 된다.
 
-GitHub에는 필요에 따라 코드와 일부 `outputs`만 올린다. 일반적으로 `data/`, `models/`, `.venv/`는 올리지 않는다.
+## 실제 사고 자료를 이용한 공간 확인
 
+`data/raw/weather/13_24_freezing.csv`의 강남구 결빙사고 다발지역은 모델 학습과 계수 조정에 사용하지 않고 독립 공간 proxy로만 사용한다.
 
-PowerShell에서 실행:
+- 원자료 13건을 동일 장소 기준 6개 군집으로 통합
+- 사고지역과 겹치는 모든 도로의 평균 위험 백분위 사용
+- 지역 안에서 최고 위험 도로만 고르는 선택 편향 제거
+- 무작위 비교도 사고지역별 도로 개수를 동일하게 유지
+- 사고건수 가중 평균 위험 백분위 0.717, 무작위 평균 0.501, p=0.0001
+- 제안 경로의 사고지역 내부 선택률 70.4%, 전체 선택률 73.6%, p=0.678
 
-```powershell
-conda activate mh_ai311
-````
+사고 다발지역은 개별 시각의 도로 결빙 정답이 아니다. 이 결과는 위험 순위의 공간적 일치도이며 도로 결빙 분류 정확도가 아니다.
 
-## 3-1. 새 컴퓨터/새 환경에서 처음 설치
+위험 순위의 공간 일치도는 확인됐지만, 현재 제안 경로가 사고지역 도로를 무작위 동일 규모 선택보다 더 많이 포함한다는 근거는 없다. `simulation_results.json`의 개선율은 외부 정답이 아닌 동일 계산식 안의 내부 정책 비교다.
 
-Python 라이브러리를 한 번에 설치하는 파일은 `requirements.txt`다.
+## 공식 상습결빙구간 교차검증
 
-가장 간단한 설치:
+`collect_public_data.py`는 행정안전부 상습결빙구간 3,358건을 공식 페이지에서 수집한다. 서울 268건 중 강남구 7개 구간을 추출해 표준 링크 28개와 연결했다. 이 자료도 모델 학습과 계수 조정에는 사용하지 않았다.
 
-```powershell
-python -m pip install -r requirements.txt
-```
+| 항목 | 결과 |
+|---|---:|
+| 강남 공식 상습결빙구간 | 7개 |
+| 매칭 표준 링크 | 28개 |
+| 평균 위험 백분위 | 0.400 |
+| 무작위 평균 | 0.501 |
+| permutation p-value | 0.896 |
 
-다만 Windows에서는 `geopandas`, `pyogrio`, `pyproj`, `shapely` 같은 공간정보 라이브러리가 pip에서 꼬일 수 있다. 그래서 새 환경에서는 Conda용 `environment.yml` 사용을 더 권장한다.
+현재 모델은 공식 상습결빙구간에 일반화되지 않았다. 인접 관측소의 실제 노면온도는 추가됐지만 도로별 경사, 교량·터널, 배수, 포장재와 공간별 노면센서가 부족하다는 근거다. 이 결과를 숨기거나 해당 7개 구간으로 계수를 조정하지 않는다.
 
-Conda 새 환경 생성:
+## 설치
+
+권장 방식은 Conda 환경이다.
 
 ```powershell
 conda env create -f environment.yml
 conda activate smart-deicing
 ```
 
-이미 같은 이름의 환경이 있으면 갱신:
+기존 `mh_ai311` 환경을 사용할 수도 있다.
 
 ```powershell
-conda env update -f environment.yml --prune
-conda activate smart-deicing
-```
-
-설치 확인:
-
-```powershell
-python -c "import geopandas, torch, pytorch_lightning, folium; print('OK')"
-python -m pytest tests
+conda activate mh_ai311
+python -m pip install -r requirements.txt
 ```
 
 GPU 확인:
@@ -85,276 +87,128 @@ GPU 확인:
 python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
-새 환경 기준 전체 실행:
+## 전체 실행
 
 ```powershell
 python scripts\preprocess_data.py
-python scripts\main_pipeline.py
+python scripts\collect_public_data.py
 python scripts\train_mlp_pipeline.py
 python scripts\validation_simulation.py
-python -m pytest tests
+python -m pytest tests --basetemp .pytest_run
 ```
 
-## 4. 데이터 전처리
+역할:
 
-원본 데이터를 정제해서 `outputs/data/cleaned` 아래에 저장한다.
+1. `preprocess_data.py`: 도로·건물·기상·생활인구 정제와 MLP 시간 피처 생성
+2. `collect_public_data.py`: 행정안전부 상습결빙구간과 강남 인접 기상청 노면관측 수집·정제
+3. `train_mlp_pipeline.py`: 실제 노면온도 MLP 학습, 2025-12 홀드아웃 평가, 도로 위험도·경로·지도 생성
+4. `validation_simulation.py`: 사고 다발지역과 공식 상습결빙구간을 이용한 독립 공간 proxy 검증
+
+`main_pipeline.py`는 저장된 `models/road_surface_temperature_mlp.pt`로 지도와 경로를 다시 생성한다. 모델이 없으면 먼저 `train_mlp_pipeline.py`를 실행해야 한다.
+
+## 주요 입력
+
+| 데이터 | 파일 | 역할 |
+|---|---|---|
+| 도로망 | `MOCT_LINK.shp`, `MOCT_NODE.shp` | 도로 특성·방향 그래프·경로 |
+| 건물 | `AL_D162_11_20260115.shp` | 시간대별 건물 그림자 |
+| ASOS 기상 | `OBS_ASOS_TIM_*.csv` | 대기·지면온도·수분·일사 입력 피처 |
+| 도로기상 | `kma_road_weather_hourly.csv` | 현재 노면온도 입력과 3시간 후 실측 정답 |
+| 생활인구 | `250_LOCAL_RESD_*.csv` | 제설 우선순위의 노출도 |
+| 결빙사고 다발지역 | `13_24_freezing.csv` | 독립 공간 proxy 검증 |
+| 상습결빙구간 | `habitual_icing_segments_20251107.csv` | 두 번째 독립 공간 proxy 검증 |
+
+기상청 도로기상관측은 API Hub 인증키가 있을 때 자동 수집한다. 기본 범위는 2024-11-01부터 2026-02-01 전까지의 겨울철이며, 강남에서 가장 가까운 `목표(결빙)` 관측소를 자동 선택한다. 2026년 2월 원지 관측은 일부 날짜에서 API 시간 초과가 확인되어 기본 범위에서 제외했다. 분 단위 원자료는 `data/raw/weather/road_observations`에 gzip으로 캐시하고, 날짜별 이어받기 캐시도 함께 유지한다. 모델 결합용 시간 단위 자료는 `outputs/data/cleaned/kma_road_weather_hourly.csv`에 저장한다. 강남 도로 자체가 아닌 인접 고속도로 관측이므로 전이학습·외부 보조자료로 사용해야 한다.
+
+CMD에서 실행:
+
+```bat
+set KMA_API_KEY=발급받은_인증키
+python scripts\collect_public_data.py
+```
+
+PowerShell에서 실행:
 
 ```powershell
-python scripts\preprocess_data.py
+$env:KMA_API_KEY = "발급받은_인증키"
+python scripts\collect_public_data.py
 ```
 
-Conda 파이썬 직접 실행:
+인증키는 코드·설정 파일·보고서에 저장하지 않는다. 기존 캐시를 무시하고 다시 받을 때만 `--refresh`를 사용한다.
 
-```powershell
-C:\Users\USER\miniconda3\envs\mh_ai311\python.exe scripts\preprocess_data.py
-```
+공식 출처:
 
-전처리 산출물:
+- 행정안전부 상습결빙구간: https://www.data.go.kr/data/15067396/fileData.do
+- 기상청 도로기상관측자료: https://www.data.go.kr/data/15159045/openapi.do
+- 기상청 AWS 자료: https://data.kma.go.kr/data/grnd/selectAwsRltmList.do
+
+제설 비용과 살포량은 `config/deicing_costs.json`에서 관리한다. 비용은 MLP 입력에 사용하지 않고 도로 선택 최적화 단계에서만 사용한다.
+
+## 모델 입력
+
+MLP는 다음 26개 피처를 사용한다. 모든 노면 이력 피처는 예측 시각 이전 관측만 사용한다.
 
 ```text
-outputs/data/cleaned/gangnam_roads_clean.geojson
-outputs/data/cleaned/gangnam_buildings_clean.geojson
-outputs/data/cleaned/weather_winter_clean.csv
-outputs/data/cleaned/population_grid_clean.csv
-outputs/reports/data_quality_report.json
-outputs/reports/data_quality_report.md
+temp, ground_temp_now, ground_temp_lag_1h, temp_6h_mean,
+humidity, dewpoint_depression, wind, precip_6h, snow, new_snow_6h,
+solar, solar_3h_sum, sunshine,
+hour_sin, hour_cos, day_sin, day_cos
+road_surface_temp_now, road_surface_temp_lag_1h,
+road_surface_temp_lag_2h, road_surface_temp_lag_3h,
+road_surface_temp_lag_6h, road_surface_temp_mean_3h,
+road_surface_temp_mean_6h, road_surface_temp_change_1h,
+road_surface_temp_change_3h
 ```
 
-전처리에서 하는 일:
+`deicing_cost`, `area`, `priority_score`, 기존 계산식 `risk`는 모델 입력에서 제외했다.
 
-- `MOCT_LINK.shp` 도로 링크 로딩
-- `MOCT_NODE.shp` 기준으로 링크 시작/종료점 보정
-- `ROAD_USE` 통행불가 도로 제거
-- 강남구 범위 도로 필터링
-- 건물 높이 결측값 보정
-- 겨울철 기상 데이터 정리
-- 생활인구 250m 격자 데이터 정리
-
-## 5. 전체 파이프라인 실행
-
-전처리된 데이터를 사용해서 위험도 계산, 도로 선택, VRP 경로 생성, 지도 출력을 한 번에 수행한다.
-
-```powershell
-python scripts\main_pipeline.py
-```
-
-Conda 파이썬 직접 실행:
-
-```powershell
-C:\Users\USER\miniconda3\envs\mh_ai311\python.exe scripts\main_pipeline.py
-```
-
-## 5-1. 제설 비용/살포량 설정
-
-제설 비용과 도포량은 코드에 직접 박지 않고 `config/deicing_costs.json`에서 읽는다.
-
-```json
-{
-  "unit_spread_kg_per_m2": 0.03,
-  "material_cost_won_per_kg": 300,
-  "labor_cost_won_per_km": 50000,
-  "environmental_cost_won_per_kg": 0,
-  "default_road_width_m": 8,
-  "road_width_by_rank_m": {
-    "101": 30,
-    "102": 25,
-    "103": 20,
-    "104": 8,
-    "105": 6,
-    "106": 6,
-    "107": 4,
-    "108": 4
-  }
-}
-```
-
-단가나 살포량을 바꾸고 싶으면 이 JSON만 수정한 뒤 다시 실행한다.
-
-```powershell
-python scripts\main_pipeline.py
-python scripts\train_mlp_pipeline.py
-python scripts\validation_simulation.py
-```
-
-다른 설정 파일을 임시로 쓰고 싶으면 환경변수로 지정할 수 있다.
-
-```powershell
-$env:DEICING_COST_CONFIG="C:\path\to\deicing_costs.json"
-python scripts\main_pipeline.py
-```
-
-주요 출력:
+## 모델 산출물
 
 ```text
-outputs/data/gangnam_roads_result.geojson
-outputs/maps/map_freezing_risk.html
-outputs/maps/map_optimal_route.html
-outputs/maps/map_priority_heatmap.html
-outputs/maps/map_navigation_route.html
-outputs/maps/map_navigation_simulation.html
-outputs/maps/map_validation_simulation.html
-outputs/reports/simulation_results.json
-outputs/reports/route_navigation.json
-outputs/reports/validation_simulation.json
-outputs/figures/simulation_comparison.png
-outputs/figures/validation_simulation.png
-```
-
-## 6. MLP 학습 및 모델 내보내기
-
-MLP 결빙 위험 모델과 사고 위험 모델을 학습하고, 학습된 모델 파일과 지도 산출물을 다시 생성한다.
-
-```powershell
-python scripts\train_mlp_pipeline.py
-```
-
-Conda 파이썬 직접 실행:
-
-```powershell
-C:\Users\USER\miniconda3\envs\mh_ai311\python.exe scripts\train_mlp_pipeline.py
-```
-
-GPU가 잡히면 로그에 다음처럼 표시된다.
-
-```text
-학습 장치: GPU - NVIDIA GeForce RTX 5090
-GPU available: True (cuda), used: True
-```
-
-모델 출력:
-
-```text
-models/icing_risk_mlp.pt
-models/accident_risk_mlp.pt
+models/road_surface_temperature_mlp.pt
+models/road_surface_model_manifest.json
+outputs/reports/road_surface_model_metrics.json
+outputs/reports/road_surface_model_card.json
 outputs/reports/mlp_training_summary.json
-outputs/figures/mlp_model_evaluation.png
+outputs/figures/road_surface_mlp_evaluation.png
 ```
 
-## 7. 지도 확인
+모델 바이너리 `.pt`는 약 245KB이므로 Git 제외 대상이 아니다. `models/road_surface_model_manifest.json`의 SHA-256, 모델 버전, 실제 정답, 홀드아웃 성능과 함께 보관한다. 실행 시 모델 해시와 26개 입력 피처 순서가 manifest·현재 코드와 일치하는지 확인한다.
 
-생성된 HTML 파일을 브라우저에서 열면 된다.
+## v1 대비 개선
+
+- 시간 평균을 해당 시간의 끝 시각에 붙여 최대 59분의 미래 정보가 들어갈 가능성을 제거했다.
+- 과거 2·3·6시간 노면온도, 3·6시간 이동평균, 1·3시간 변화율을 추가했다.
+- 동일한 미학습 2025년 12월에서 RMSE `1.212 → 1.064°C`(-12.2%), MAE `0.949 → 0.804°C`(-15.2%), R² `0.929 → 0.946`으로 개선됐다.
+- 관측 -3~+3°C 구간 RMSE도 `1.015 → 0.846°C`(-16.7%)로 낮아졌다.
+- 자세한 비교는 `outputs/reports/model_improvement_comparison.md`에 기록한다.
+
+## 지도와 리포트
 
 ```text
 outputs/maps/map_freezing_risk.html
-outputs/maps/map_optimal_route.html
 outputs/maps/map_priority_heatmap.html
+outputs/maps/map_optimal_route.html
 outputs/maps/map_navigation_route.html
 outputs/maps/map_navigation_simulation.html
-```
-
-이미 브라우저에서 열려 있다면 `Ctrl + F5`로 강제 새로고침한다.
-
-지도별 의미:
-
-- `map_freezing_risk.html`: 도로별 결빙 위험도
-- `map_priority_heatmap.html`: 우선순위 히트맵
-- `map_optimal_route.html`: 제설 대상 도로와 차량별 작업 구역
-- `map_navigation_route.html`: 제설차별 경로와 상세 카드
-- `map_navigation_simulation.html`: 재생형 제설차 이동 시뮬레이션
-- `map_validation_simulation.html`: 예측 위험도와 시점별 관측 상황 비교 지도
-
-## 7-1. 예측 위험도 검증 시뮬레이션
-
-현재 보유한 사고 자료는 도로 좌표별 실제 사고 라벨이 아니라, 강남구 날씨별 사고 통계와 노면상태/시간대별 사고 통계다. 그래서 실제 지점별 사고 라벨을 확보하기 전까지는 통계 기반 검증 시뮬레이션으로 예측 위험도와 관측 상황을 비교한다.
-
-검증 흐름:
-
-```text
-예측 위험도 + 사고확률
-+ 해당 시점 기상 상황
-+ 강남구 날씨별 사고 통계
-+ 노면상태/시간대별 사고 통계
--> 시점별/도로별 관측 이벤트 생성
--> 예측 위험도와 관측 이벤트 비교
-```
-
-실행:
-
-```powershell
-python scripts\validation_simulation.py
-```
-
-Conda 파이썬 직접 실행:
-
-```powershell
-C:\Users\USER\miniconda3\envs\mh_ai311\python.exe scripts\validation_simulation.py
-```
-
-출력:
-
-```text
-outputs/reports/validation_simulation.json
-outputs/reports/validation_events_sample.csv
-outputs/reports/validation_road_summary.csv
-outputs/figures/validation_simulation.png
 outputs/maps/map_validation_simulation.html
+outputs/reports/validation_simulation.json
+outputs/reports/validation_hotspot_matches.csv
 ```
 
-주의:
+## 해석 가능한 주장
 
-- 이 검증은 실제 좌표별 사고 라벨이 없는 상태의 통계 기반 시뮬레이션이다.
-- 실제 사고 좌표/시간 또는 도로 결빙 관측 데이터가 들어오면 `actual_event`를 그 데이터로 교체하면 된다.
+- 실제 기상청 노면온도를 학습한 MLP를 미학습 2025년 12월로 평가했다.
+- 미학습 월의 예측 노면온도와 수분·그림자를 결합해 도로의 상대 제설 우선순위를 계산했다.
+- 실제 결빙사고 다발지역을 학습에 사용하지 않고 공간 proxy로 비교했다.
 
-## 8. 테스트
+현재 주장하면 안 되는 내용:
 
-전체 테스트:
+- 도로별 결빙 정확도 97.5%
+- 사고 발생확률 정확도 97.5%
+- 제설로 인한 실제 사고 감소율
+- `risk`를 절대 결빙 발생확률로 표현
 
-```powershell
-python -m pytest tests
-```
+도로×시각 실측 라벨을 확보하면 노면센서·시각이 있는 CCTV 판독·현장 점검 자료를 `LINK_ID`, `timestamp`, `icing` 형태로 연결해 공간 홀드아웃 평가를 추가해야 한다.
 
-Conda 파이썬 직접 실행:
-
-```powershell
-C:\Users\USER\miniconda3\envs\mh_ai311\python.exe -m pytest tests
-```
-
-캐시 권한 경고가 뜨면 테스트 자체가 실패한 것은 아닐 수 있다. 마지막 줄의 `passed` 여부를 확인한다.
-
-## 9. 실행 순서 추천
-
-데이터를 새로 넣었거나 도로/건물/기상/생활인구가 바뀐 경우:
-
-```powershell
-python scripts\preprocess_data.py
-python scripts\main_pipeline.py
-python scripts\train_mlp_pipeline.py
-python scripts\validation_simulation.py
-python -m pytest tests
-```
-
-코드만 조금 바꿨고 기존 정제 데이터를 그대로 쓸 경우:
-
-```powershell
-python scripts\main_pipeline.py
-python scripts\train_mlp_pipeline.py
-python scripts\validation_simulation.py
-python -m pytest tests
-```
-
-지도만 다시 보고 싶을 경우:
-
-```powershell
-python scripts\main_pipeline.py
-```
-
-## 10. 주의사항
-
-- `outputs`는 결과 파일이라 용량이 커질 수 있다.
-- `data` 원본은 GitHub에 올리지 않는 것을 권장한다.
-- `models` 학습 모델도 보통 GitHub에는 올리지 않는다.
-- `MOCT_LINK.shp`, `MOCT_NODE.shp`가 Git LFS pointer 파일이면 실행이 실패한다.
-- 네비게이션 경로는 실제 도로망의 `F_NODE`, `T_NODE` 연결을 기준으로 만든다.
-- 도로가 실제로 단절되어 있거나 원본 노드링크가 끊긴 경우 일부 이동 경로가 길어질 수 있다.
-
-## 11. 현재 산출물 기준 요약
-
-최근 실행 기준 주요 결과:
-
-- 정제 강남 도로: `2,072개`
-- 선택 도로: `1,187개`
-- 자동 제설차 수: `5대`
-- 총 경로: 약 `553.4km`
-- 위험구간 커버: `12.7% -> 97.3%`
-- 염화칼슘 사용량: 약 `22.8%` 절감
-- 테스트: `29 passed`
+현재 정답은 강남 중심에서 약 5.25km 떨어진 원지(도) 단일 노면 관측소 자료다. 실제 노면온도를 학습했지만 강남구 도로별 공간 차이를 직접 학습한 모델은 아니며, 건물 그림자와 생활인구는 MLP 학습 이후의 도로 우선순위 단계에서 반영한다.

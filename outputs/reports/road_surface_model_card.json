@@ -1,0 +1,68 @@
+{
+  "model_version": "road_surface_temperature_residual_mlp_v2",
+  "purpose": "3시간 후 실측 노면온도를 예측해 제설 상대 위험도 입력으로 사용",
+  "label_source": "KMA road weather station 13402 observed road-surface temperature",
+  "pseudo_label_used": false,
+  "temporal_split": {
+    "development_range": [
+      "2024-11-01T10:00:00",
+      "2025-03-01T00:00:00"
+    ],
+    "calibration_period": "2025-11",
+    "test_period": "2025-12"
+  },
+  "metrics": {
+    "regression": {
+      "rmse_c": 1.0637802416283124,
+      "mae_c": 0.8044503458327412,
+      "r2": 0.9456853214078392,
+      "bias_observed_minus_predicted_c": -0.0320774928056918,
+      "skill_vs_road_persistence_rmse": 0.6123448595504997
+    },
+    "freezing": {
+      "rows": 724,
+      "observed_freeze_rate": 0.27071823204419887,
+      "brier_score": 0.04327788216652442,
+      "decision_threshold": 0.5,
+      "precision": 0.9575757575757575,
+      "recall": 0.8061224489795918,
+      "f1": 0.8753462603878116,
+      "pr_auc": 0.9759734727602455,
+      "roc_auc": 0.9909651360544217
+    },
+    "uncertainty": {
+      "rmse_c_95pct": [
+        0.998706490970904,
+        1.1285422732544503
+      ],
+      "mae_c_95pct": [
+        0.7540911614030031,
+        0.8537410813654216
+      ],
+      "freeze_pr_auc_95pct": [
+        0.9621850562219659,
+        0.9868389435168219
+      ],
+      "bootstrap_iterations": 1000,
+      "seed": 42
+    },
+    "slices": {
+      "near_freezing_observed_minus3_to_plus3_c": {
+        "rows": 274,
+        "rmse_c": 0.8456642049738311,
+        "mae_c": 0.6331107475699227,
+        "r2": 0.7229110580912537,
+        "bias_observed_minus_predicted_c": -0.04973040782168976
+      }
+    }
+  },
+  "allowed_claims": [
+    "미학습 월의 원지 관측소 실측 노면온도로 3시간 예측 성능을 평가했다.",
+    "예측 노면온도와 수분 및 그림자를 결합해 도로의 상대 제설 순위를 만들었다."
+  ],
+  "prohibited_claims": [
+    "단일 인접 관측소 성능을 강남 모든 도로의 결빙 정확도로 표현",
+    "도로 risk를 사고확률 또는 절대 결빙확률로 표현"
+  ],
+  "spatial_limit": "경부선 원지 관측소는 강남 중심에서 약 5.25km 떨어진 단일 지점"
+}

@@ -18,6 +18,7 @@ scikit-learn==1.8.0
 torch==2.5.1
 pytorch-lightning==2.6.0
 torchmetrics==1.8.2
+requests==2.32.5
 
 pydantic==2.12.5
 openpyxl==3.1.5

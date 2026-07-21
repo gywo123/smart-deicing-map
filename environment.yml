@@ -28,3 +28,4 @@ dependencies:
   - pip
   - pip:
       - pypdf==6.11.0
+      - requests==2.32.5
